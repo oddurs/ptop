@@ -239,7 +239,10 @@ fn draw_timeline(f: &mut Frame, area: Rect, app: &App) {
     let labelled = gutter > 0 && cpu_rows >= MIN_ROWS_FOR_LABEL && mem_rows >= MIN_ROWS_FOR_LABEL;
 
     let mut lines: Vec<Line> = Vec::with_capacity(inner_h);
-    for (values, rows, name) in [(&cpu_slots, cpu_rows, "CPU"), (&mem_slots, mem_rows, "MEM")] {
+    for (values, rows, name, series) in [
+        (&cpu_slots, cpu_rows, "CPU", app.theme.series_cpu),
+        (&mem_slots, mem_rows, "MEM", app.theme.series_mem),
+    ] {
         // Both thresholds, not just critical. The warn boundary is the one the
         // roadmap actually asked for, and leaving it hue-only kept it invisible
         // to the commonest colour vision deficiency and on any mono terminal.
@@ -251,7 +254,19 @@ fn draw_timeline(f: &mut Frame, area: Rect, app: &App) {
             let rule_level = rules.iter().find(|(r, _)| *r == row).map(|(_, l)| *l);
             let mut spans = axis_label(row, rows, gutter, &app.theme, labelled.then_some(name));
             spans.extend(
-                glyph_row(app.glyphs, values, row, rows, spc, &app.theme, rule_level).spans,
+                glyph_row(
+                    GraphRow {
+                        set: app.glyphs,
+                        values,
+                        row,
+                        rows,
+                        spc,
+                        rule_level,
+                        series,
+                    },
+                    &app.theme,
+                )
+                .spans,
             );
             lines.push(Line::from(spans));
         }
@@ -292,15 +307,34 @@ fn draw_timeline(f: &mut Frame, area: Rect, app: &App) {
 }
 
 /// One row of graph. `row` counts from the top of a `rows`-tall graph.
-fn glyph_row(
+/// Everything one graph row needs to draw itself. Bundled because seven
+/// positional parameters had become eight and the call site was unreadable.
+/// `row` counts from the top of a `rows`-tall graph.
+struct GraphRow<'a> {
     set: GlyphSet,
-    values: &[Option<f32>],
+    values: &'a [Option<f32>],
+    /// Counted from the top of a `rows`-tall graph.
     row: usize,
     rows: usize,
+    /// Samples per character cell.
     spc: usize,
-    theme: &Theme,
+    /// Dot height of a threshold rule crossing this row, if any.
     rule_level: Option<usize>,
-) -> Line<'static> {
+    /// Identity of the series — never a judgement about its value.
+    series: Color,
+}
+
+/// Draw one row of a graph.
+fn glyph_row(g: GraphRow, theme: &Theme) -> Line<'static> {
+    let (set, values, row, rows, spc, rule_level, series) = (
+        g.set,
+        g.values,
+        g.row,
+        g.rows,
+        g.spc,
+        g.rule_level,
+        g.series,
+    );
     let spans = values
         .chunks(spc)
         .enumerate()
@@ -308,9 +342,9 @@ fn glyph_row(
             let pcts: Vec<f32> = cell.iter().map(|v| v.unwrap_or(0.0)).collect();
             let left = glyphs::level_in_row(pcts[0], row, rows);
             let right = glyphs::level_in_row(*pcts.get(1).unwrap_or(&pcts[0]), row, rows);
-            // Colour by the peak of the pair: a cell holding a spike and an
-            // idle sample should read as hot, not as lukewarm.
-            let peak = pcts.iter().copied().fold(0.0_f32, f32::max);
+            // Colour is identity here, not magnitude — see `Theme::series_style`.
+            // The threshold rules now carry "is this bad", which is what the
+            // heat ramp was doing redundantly on top of the bar height.
             // Data always wins the cell. The rule fills gaps only, and dashes
             // so it reads as a reference line rather than a row of samples — at
             // the mono tier a solid rule is indistinguishable from a low bar,
@@ -320,7 +354,10 @@ fn glyph_row(
                 Some(lvl) if empty && i % 2 == 0 => {
                     Span::styled(set.rule_glyph(lvl).to_string(), theme.chrome_style())
                 }
-                _ => Span::styled(set.glyph(left, right).to_string(), theme.heat_style(peak)),
+                _ => Span::styled(
+                    set.glyph(left, right).to_string(),
+                    theme.series_style(series),
+                ),
             }
         })
         .collect::<Vec<_>>();
