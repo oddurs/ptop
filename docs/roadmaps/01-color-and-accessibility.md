@@ -66,7 +66,7 @@ colour sequences.
 
 ---
 
-## C3 — Colour-vision-safe default palette  ·  `S`
+## C3 — Colour-vision-safe default palette  ·  `S`  ·  **DONE**
 
 **What.** Default to cyan/amber/red (`#5ccfe6,#ffd580,#ff6666` measured above)
 at the 256/truecolor tier. Keep green/yellow/red available as

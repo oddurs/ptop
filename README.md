@@ -118,6 +118,21 @@ cargo build --release
 `ptop --once` prints a single plain-text sample and exits, for scripts and cron.
 `ptop --bench` times 20 collection passes, for checking the cost of a change.
 
+`--color=auto|mono|16|256|true` picks the colour tier. Detected from
+`COLORTERM` and `TERM`, and `NO_COLOR` is honoured. Each tier stands on its own:
+monochrome is not a fallback but the proof that no meaning here is carried by
+colour alone — thresholds, severity, selection and the paused state all survive
+without it.
+
+`--theme=safe|classic|auto` picks the palette. **`safe` is the default and
+replaces green with cyan.** Green-and-yellow is the worst available pair for
+red-green colour vision deficiency, which affects roughly 8% of men, and every
+system monitor ships it: measured in OKLab ΔE×100 under Machado 2009 simulation
+against a dark surface, ptop's old green↔yellow separated by **3.7** under
+protanopia, against a target of 8. The shipped palette's worst pair among its
+five meaning-bearing hues is **10.3**. `--theme=classic` restores
+green/yellow/red for anyone who wants the convention back.
+
 `--glyphs=braille|block|ascii` picks how the timeline is drawn. Braille packs
 two samples into every character cell and stacks cells vertically for twelve
 distinct heights; `block` needs less font support; `ascii` needs none. A Linux

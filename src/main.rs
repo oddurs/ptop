@@ -36,6 +36,10 @@ USAGE:
     --glyphs=SET    timeline drawing: braille (default), block, or ascii.
                     Falls back to ascii automatically on a Linux console.
     --color=TIER    auto (default), mono, 16, 256, or true. Honours NO_COLOR.
+    --theme=NAME    safe (default), classic, or auto. 'safe' replaces green with
+                    cyan: green/yellow separates by only dE 3.7 under simulated
+                    protanopia, against a target of 8, and red-green deficiency
+                    affects roughly 8% of men. 'classic' restores green/yellow/red.
 
 OPTIONS:
     -h, --help      show this help
@@ -74,6 +78,7 @@ fn main() -> io::Result<()> {
 
     let mut glyphs = default_glyphs();
     let mut tier = theme::Tier::detect();
+    let mut palette = theme::Palette::default();
     let mut positional = Vec::new();
     for a in &args {
         if let Some(name) = a.strip_prefix("--glyphs=") {
@@ -93,6 +98,19 @@ fn main() -> io::Result<()> {
                     Some(t) => tier = t,
                     None => {
                         eprintln!("ptop: unknown colour tier '{name}' (auto, mono, 16, 256, true)");
+                        std::process::exit(2);
+                    }
+                },
+            }
+        } else if let Some(name) = a.strip_prefix("--theme=") {
+            match name {
+                // Re-resolve rather than no-op, so a later --theme=auto can
+                // override an earlier --theme= baked into a wrapper script.
+                "auto" | "default" => palette = theme::Palette::default(),
+                _ => match theme::Palette::parse(name) {
+                    Some(pal) => palette = pal,
+                    None => {
+                        eprintln!("ptop: unknown theme '{name}' (safe, classic, auto)");
                         std::process::exit(2);
                     }
                 },
@@ -138,7 +156,7 @@ fn main() -> io::Result<()> {
 
     let mut app = App::new(HISTORY_LEN);
     app.glyphs = glyphs;
-    app.theme = theme::Theme::new(tier);
+    app.theme = theme::Theme::new(palette, tier);
 
     // Collect once before drawing so the first frame has real numbers. CPU
     // still reads zero — there is no previous counter to diff against yet.

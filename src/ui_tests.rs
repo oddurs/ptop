@@ -6,6 +6,7 @@
 
 use crate::app::App;
 use crate::sample::{MemStat, ProcSample, Sample};
+use crate::theme::{Palette, Theme, Tier};
 use crate::ui;
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
@@ -533,13 +534,12 @@ fn render_digest() {
 fn mono_tier_emits_no_colour_anywhere_on_screen() {
     // The acceptance criterion for the tier: not "mostly grey", but that no
     // rendered cell carries a colour at all.
-    use crate::theme::{Theme, Tier};
     let mut app = App::new(60);
     let mut s = sample(90.0);
     s.io_collected = true;
     s.io_denied = 1;
     app.push(s);
-    app.theme = Theme::new(Tier::Mono);
+    app.theme = Theme::new(Palette::Classic, Tier::Mono);
     app.toggle_io();
     app.tree = true;
     app.history.scrub(-1);
@@ -563,12 +563,11 @@ fn mono_tier_emits_no_colour_anywhere_on_screen() {
 #[test]
 fn mono_tier_still_marks_the_paused_state() {
     // Losing colour must not lose the loudest warning in the UI.
-    use crate::theme::{Theme, Tier};
     let mut app = App::new(60);
     for i in (0..6).rev() {
         app.push(sample_at(50.0, i));
     }
-    app.theme = Theme::new(Tier::Mono);
+    app.theme = Theme::new(Palette::Classic, Tier::Mono);
     app.history.scrub(-3);
 
     let mut term = Terminal::new(TestBackend::new(100, 30)).unwrap();
@@ -584,11 +583,10 @@ fn mono_tier_still_marks_the_paused_state() {
 
 #[test]
 fn every_tier_renders() {
-    use crate::theme::{Theme, Tier};
     for tier in [Tier::Mono, Tier::Ansi16, Tier::Ansi256, Tier::TrueColor] {
         let mut app = App::new(60);
         app.push(sample(75.0));
-        app.theme = Theme::new(tier);
+        app.theme = Theme::new(Palette::Classic, tier);
         let out = render(&app, 100, 30);
         assert!(out.contains("postgres"), "{tier:?} failed to render");
         // And at a size where everything is fighting for room.
@@ -600,11 +598,10 @@ fn every_tier_renders() {
 fn coloured_tiers_actually_differ_from_mono() {
     // Guards against a tier that silently resolves to the same styling, which
     // would make the mono test above pass for the wrong reason.
-    use crate::theme::{Theme, Tier};
     let styled = |tier| {
         let mut app = App::new(60);
         app.push(sample(90.0));
-        app.theme = Theme::new(tier);
+        app.theme = Theme::new(Palette::Classic, tier);
         let mut term = Terminal::new(TestBackend::new(100, 30)).unwrap();
         term.draw(|f| ui::draw(f, &app)).unwrap();
         let buf = term.backend().buffer();
@@ -624,14 +621,13 @@ fn coloured_tiers_actually_differ_from_mono() {
 fn show_tiers() {
     // Prints the frame with a modifier map under the header, so the monochrome
     // tier can be eyeballed for whether meaning survives without colour.
-    use crate::theme::{Theme, Tier};
     use ratatui::style::Modifier;
     for tier in [Tier::Mono, Tier::TrueColor] {
         let mut app = App::new(600);
         for i in (0..200).rev() {
             app.push(sample_at((i as f32 * 0.7).sin().abs() * 95.0, i));
         }
-        app.theme = Theme::new(tier);
+        app.theme = Theme::new(Palette::Classic, tier);
         app.history.scrub(-8);
         let mut term = Terminal::new(TestBackend::new(96, 12)).unwrap();
         term.draw(|f| ui::draw(f, &app)).unwrap();
@@ -661,4 +657,14 @@ fn show_tiers() {
             }
         }
     }
+}
+
+#[test]
+fn the_default_theme_is_the_colour_vision_safe_one() {
+    // The point of C3: safe is the default, classic is the escape hatch, not
+    // the other way round.
+    let app = App::new(60);
+    assert_eq!(app.theme, Theme::default());
+    assert_eq!(Palette::default(), Palette::Safe);
+    assert_ne!(app.theme.ok, ratatui::style::Color::Green);
 }
