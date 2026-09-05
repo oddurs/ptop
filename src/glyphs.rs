@@ -119,14 +119,17 @@ fn braille_bits(left: usize, right: usize) -> u32 {
 /// the rule sits at within that row.
 ///
 /// `None` when the threshold falls outside the graph entirely.
-pub fn rule_position(pct: f32, rows: usize) -> Option<(usize, usize)> {
-    if !(0.0..=100.0).contains(&pct) || rows == 0 {
+/// `None` when the threshold sits above the ceiling — the common case on an
+/// idle machine, and why the rules stop dashing a hundred dots of noise across
+/// an otherwise empty graph.
+pub fn rule_position_scaled(pct: f32, rows: usize, ceiling: f32) -> Option<(usize, usize)> {
+    if !(0.0..=ceiling).contains(&pct) || rows == 0 {
         return None;
     }
     let rows_f = rows as f32;
     for row in 0..rows {
-        let high = 100.0 * (rows_f - row as f32) / rows_f;
-        let low = 100.0 * (rows_f - row as f32 - 1.0) / rows_f;
+        let high = ceiling * (rows_f - row as f32) / rows_f;
+        let low = ceiling * (rows_f - row as f32 - 1.0) / rows_f;
         // Top row owns its upper bound so a 100% threshold has somewhere to go.
         let in_band = if row == 0 { pct <= high } else { pct < high };
         if in_band && pct >= low {
@@ -135,7 +138,7 @@ pub fn rule_position(pct: f32, rows: usize) -> Option<(usize, usize)> {
             // percentage lands: at six graph rows an 80% bar had to reach
             // 81.25% before it touched its own 80% line, while `heat_style`
             // already coloured it critical. Two signals, contradicting.
-            let level = level_in_row(pct, row, rows).max(1);
+            let level = level_in_row_scaled(pct, row, rows, ceiling).max(1);
             return Some((row, level));
         }
     }
@@ -155,16 +158,38 @@ const BLOCK: [char; 25] = [
 
 const ASCII: [char; 5] = [' ', '.', ':', '|', '#'];
 
+/// Ceilings the y-axis is allowed to take.
+///
+/// A small fixed set rather than the observed peak, so the scale is stable
+/// while scrubbing instead of breathing with every sample.
+const CEILINGS: [f32; 4] = [10.0, 25.0, 50.0, 100.0];
+
+/// The axis ceiling for a given peak.
+///
+/// A fixed 0..100 axis means an idle machine draws one lit row and eight blank
+/// ones — the largest panel on screen showing almost nothing. Scaling to the
+/// peak fills the graph, and printing the ceiling keeps it honest: the axis
+/// says what it is.
+pub fn ceiling_for(peak: f32) -> f32 {
+    CEILINGS
+        .iter()
+        .copied()
+        .find(|&c| peak <= c)
+        .unwrap_or(100.0)
+}
+
 /// Split a percentage into the level `0..=4` it occupies in row `row` of a
-/// `rows`-tall graph, counting rows from the top.
+/// `rows`-tall graph, counting rows from the top, against an axis that tops
+/// out at `ceiling`.
 ///
 /// Each row owns a band of the 0..100 range: a value above the band fills the
 /// row, below it leaves the row empty, and inside it scales across the five
 /// levels.
-pub fn level_in_row(pct: f32, row: usize, rows: usize) -> usize {
+pub fn level_in_row_scaled(pct: f32, row: usize, rows: usize, ceiling: f32) -> usize {
     let rows = rows.max(1) as f32;
-    let high = 100.0 * (rows - row as f32) / rows;
-    let low = 100.0 * (rows - row as f32 - 1.0) / rows;
+    let ceiling = ceiling.max(1.0);
+    let high = ceiling * (rows - row as f32) / rows;
+    let low = ceiling * (rows - row as f32 - 1.0) / rows;
 
     if pct >= high {
         4
@@ -233,21 +258,21 @@ mod tests {
     #[test]
     fn rows_partition_the_range() {
         // Top row of three covers ~67..100, bottom covers 0..~33.
-        assert_eq!(level_in_row(100.0, 0, 3), 4);
-        assert_eq!(level_in_row(0.0, 0, 3), 0);
-        assert_eq!(level_in_row(100.0, 2, 3), 4);
-        assert_eq!(level_in_row(0.0, 2, 3), 0);
+        assert_eq!(level_in_row_scaled(100.0, 0, 3, 100.0), 4);
+        assert_eq!(level_in_row_scaled(0.0, 0, 3, 100.0), 0);
+        assert_eq!(level_in_row_scaled(100.0, 2, 3, 100.0), 4);
+        assert_eq!(level_in_row_scaled(0.0, 2, 3, 100.0), 0);
         // A mid value fills the lower rows and partly fills its own.
-        assert_eq!(level_in_row(50.0, 2, 3), 4);
-        assert!((1..=4).contains(&level_in_row(50.0, 1, 3)));
-        assert_eq!(level_in_row(50.0, 0, 3), 0);
+        assert_eq!(level_in_row_scaled(50.0, 2, 3, 100.0), 4);
+        assert!((1..=4).contains(&level_in_row_scaled(50.0, 1, 3, 100.0)));
+        assert_eq!(level_in_row_scaled(50.0, 0, 3, 100.0), 0);
     }
 
     #[test]
     fn single_row_spans_the_whole_range() {
-        assert_eq!(level_in_row(0.0, 0, 1), 0);
-        assert_eq!(level_in_row(100.0, 0, 1), 4);
-        assert!((1..=4).contains(&level_in_row(50.0, 0, 1)));
+        assert_eq!(level_in_row_scaled(0.0, 0, 1, 100.0), 0);
+        assert_eq!(level_in_row_scaled(100.0, 0, 1, 100.0), 4);
+        assert!((1..=4).contains(&level_in_row_scaled(50.0, 0, 1, 100.0)));
     }
 
     #[test]
@@ -277,8 +302,8 @@ mod tests {
         // touched its own 80% line, while heat_style already called it
         // critical. Two signals, contradicting each other.
         for rows in 1..=12 {
-            let (row, level) = rule_position(80.0, rows).unwrap();
-            let bar = level_in_row(80.0, row, rows);
+            let (row, level) = rule_position_scaled(80.0, rows, 100.0).unwrap();
+            let bar = level_in_row_scaled(80.0, row, rows, 100.0);
             assert_eq!(
                 level,
                 bar.max(1),
@@ -290,22 +315,22 @@ mod tests {
     #[test]
     fn rule_position_lands_in_the_right_band() {
         // 80% of a 3-row graph is in the top row, which spans 66.7..100.
-        let (row, level) = rule_position(80.0, 3).unwrap();
+        let (row, level) = rule_position_scaled(80.0, 3, 100.0).unwrap();
         assert_eq!(row, 0);
         assert!((1..=4).contains(&level));
         // 50% of a 2-row graph is the boundary between the bands. It resolves
         // to the bottom dot of the upper row, which is that boundary drawn.
-        assert_eq!(rule_position(50.0, 2), Some((0, 1)));
+        assert_eq!(rule_position_scaled(50.0, 2, 100.0), Some((0, 1)));
         // Extremes stay inside the graph.
-        assert_eq!(rule_position(100.0, 3).unwrap().0, 0);
-        assert_eq!(rule_position(0.0, 3).unwrap().0, 2);
+        assert_eq!(rule_position_scaled(100.0, 3, 100.0).unwrap().0, 0);
+        assert_eq!(rule_position_scaled(0.0, 3, 100.0).unwrap().0, 2);
     }
 
     #[test]
     fn rule_position_refuses_the_impossible() {
-        assert_eq!(rule_position(120.0, 3), None);
-        assert_eq!(rule_position(-1.0, 3), None);
-        assert_eq!(rule_position(50.0, 0), None);
+        assert_eq!(rule_position_scaled(120.0, 3, 100.0), None);
+        assert_eq!(rule_position_scaled(-1.0, 3, 100.0), None);
+        assert_eq!(rule_position_scaled(50.0, 0, 100.0), None);
     }
 
     #[test]
@@ -313,7 +338,7 @@ mod tests {
         // Whatever the panel height, the threshold must land somewhere.
         for rows in 1..=8 {
             assert!(
-                rule_position(80.0, rows).is_some(),
+                rule_position_scaled(80.0, rows, 100.0).is_some(),
                 "{rows} rows lost the rule"
             );
         }

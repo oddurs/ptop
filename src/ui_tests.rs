@@ -780,13 +780,26 @@ fn rule_rows(app: &App, w: u16, h: u16) -> Vec<usize> {
 
 #[test]
 fn the_rules_land_on_exactly_the_threshold_rows() {
-    // The previous version of this test asserted only that *some* cell was
-    // chrome-coloured — which the panel border satisfies, so it passed with
-    // the rule removed entirely. This one pins the exact rows, so it cannot.
+    // An earlier version asserted only that *some* cell was chrome-coloured —
+    // which the panel border satisfies, so it passed with the rule removed
+    // entirely. This pins the exact rows, so it cannot.
+    //
+    // Both graphs scale to their own peak, so the expectation has to use the
+    // same ceiling the renderer picks: a threshold above the ceiling draws no
+    // rule at all, which is the point of the scaling.
     let (w, h) = (100u16, 12u16);
+    // Memory stays low so its ceiling puts both thresholds off its scale and
+    // only the CPU graph contributes rules. At 50% its 50 threshold would sit
+    // exactly on the ceiling *and* under the data, which data correctly
+    // occludes — a real behaviour, but not the one this test is about.
+    let (cpu_pct, mem_frac) = (95.0_f32, 0.05_f32);
     let mut app = App::new(600);
     for i in (0..200).rev() {
-        app.push(sample_at(10.0, i)); // data confined to the bottom row
+        // A spike lifts the CPU ceiling to 100 so both thresholds are on its
+        // scale; memory sits flat at half the machine.
+        let mut s = sample_at(if i == 100 { cpu_pct } else { 5.0 }, i);
+        s.mem.used = ((s.mem.total as f32) * mem_frac) as u64;
+        app.push(s);
     }
     app.theme = Theme::new(Palette::Safe, Tier::TrueColor);
 
@@ -794,32 +807,29 @@ fn the_rules_land_on_exactly_the_threshold_rows() {
     let graph_rows = (h as usize - 1).saturating_sub(2).max(1);
     let cpu_rows = (graph_rows * 3 / 5).max(1);
     let mem_rows = graph_rows - cpu_rows;
+    let cpu_ceiling = crate::glyphs::ceiling_for(cpu_pct);
+    let mem_ceiling = crate::glyphs::ceiling_for(mem_frac * 100.0);
 
     let mut expected: Vec<usize> = Vec::new();
     for pct in [
         crate::theme::Theme::WARN_PCT,
         crate::theme::Theme::CRITICAL_PCT,
     ] {
-        if let Some((r, _)) = crate::glyphs::rule_position(pct, cpu_rows) {
+        if let Some((r, _)) = crate::glyphs::rule_position_scaled(pct, cpu_rows, cpu_ceiling) {
             expected.push(r);
         }
-    }
-    for pct in [
-        crate::theme::Theme::WARN_PCT,
-        crate::theme::Theme::CRITICAL_PCT,
-    ] {
-        if let Some((r, _)) = crate::glyphs::rule_position(pct, mem_rows) {
+        if let Some((r, _)) = crate::glyphs::rule_position_scaled(pct, mem_rows, mem_ceiling) {
             expected.push(cpu_rows + r);
         }
     }
     expected.sort_unstable();
     expected.dedup();
 
-    assert_eq!(rule_rows(&app, w, h), expected);
     assert!(
         !expected.is_empty(),
         "no rules expected — test proves nothing"
     );
+    assert_eq!(rule_rows(&app, w, h), expected);
 }
 
 #[test]
@@ -828,8 +838,11 @@ fn both_thresholds_get_a_rule_not_just_critical() {
     let (w, h) = (100u16, 16u16);
     let mut app = App::new(600);
     for i in (0..200).rev() {
-        let mut s = sample_at(5.0, i);
-        s.mem.used = 1 << 30; // low too, or the 50% band holds data legitimately
+        // One spike lifts the ceiling to 100 so both thresholds are on the
+        // visible scale; the rest stays low so there is empty space to draw
+        // the rules into.
+        let mut s = sample_at(if i == 100 { 95.0 } else { 5.0 }, i);
+        s.mem.used = if i == 100 { 15 << 30 } else { 1 << 30 };
         app.push(s);
     }
     app.theme = Theme::new(Palette::Safe, Tier::TrueColor);
@@ -848,7 +861,8 @@ fn the_rule_is_dashed_so_it_cannot_be_read_as_data() {
     let (w, h) = (100u16, 12u16);
     let mut app = App::new(600);
     for i in (0..200).rev() {
-        app.push(sample_at(10.0, i));
+        // A spike puts the ceiling at 100 so the critical rule is on-scale.
+        app.push(sample_at(if i == 100 { 95.0 } else { 10.0 }, i));
     }
     app.theme = Theme::new(Palette::Safe, Tier::Mono);
 
@@ -857,9 +871,10 @@ fn the_rule_is_dashed_so_it_cannot_be_read_as_data() {
         .unwrap();
     let buf = term.backend().buffer();
 
-    let rule_y = 1 + crate::glyphs::rule_position(
+    let rule_y = 1 + crate::glyphs::rule_position_scaled(
         crate::theme::Theme::CRITICAL_PCT,
         (((h as usize - 1).saturating_sub(2)).max(1) * 3 / 5).max(1),
+        100.0,
     )
     .unwrap()
     .0 as u16;
@@ -979,8 +994,9 @@ fn the_gutter_carries_the_scale_and_yields_on_a_narrow_panel() {
     app.theme = Theme::new(Palette::Safe, Tier::TrueColor);
 
     let wide = gutter_text(&app, 100, 12);
+    // The top anchor is the axis ceiling, which scales to the data.
     assert!(
-        wide.contains("100"),
+        wide.chars().any(|c| c.is_ascii_digit()),
         "wide panel lost the top anchor:\n{wide}"
     );
     assert!(
@@ -992,7 +1008,7 @@ fn the_gutter_carries_the_scale_and_yields_on_a_narrow_panel() {
     // when there is barely any room.
     let narrow = gutter_text(&app, 24, 12);
     assert!(
-        !narrow.contains("100"),
+        !narrow.chars().any(|c| c.is_ascii_digit()),
         "narrow panel should drop the gutter, got:\n{narrow}"
     );
 }
@@ -1025,7 +1041,7 @@ fn a_section_too_short_for_both_ends_carries_no_axis_at_all() {
             ("mem", cpu_rows..graph_rows, mem_rows),
         ] {
             let section: String = rows.get(range).unwrap_or_default().join("");
-            let labelled = section.contains("100") || section.contains('0');
+            let labelled = section.chars().any(|c| c.is_ascii_digit());
             assert_eq!(
                 labelled,
                 n >= 2,
@@ -1058,11 +1074,10 @@ fn the_gutter_never_overlaps_the_graph() {
             let s = buf[(x, y)].symbol();
             // The concrete allowed set, not "any alphanumeric": a future glyph
             // set that used a letter would otherwise pass this silently.
-            const ALLOWED: [&str; 9] = [" ", "0", "1", "C", "P", "U", "M", "E", "0"];
-            assert!(
-                ALLOWED.contains(&s),
-                "unexpected glyph {s:?} inside the gutter at ({x},{y})"
-            );
+            let ok = s == " "
+                || s.chars().all(|c| c.is_ascii_digit())
+                || matches!(s, "C" | "P" | "U" | "M" | "E");
+            assert!(ok, "unexpected glyph {s:?} inside the gutter at ({x},{y})");
         }
     }
 }
@@ -1883,7 +1898,9 @@ fn present_at(app: &App, w: u16, h: u16) -> Present {
         // Scoped to the timeline's gutter columns. Matching "CPU " anywhere
         // finds the header figures, which are always drawn — a false positive
         // that made the gutter look like it never yielded.
-        axis_anchors: timeline.clone().any(|y| row(y).starts_with("100")),
+        axis_anchors: timeline
+            .clone()
+            .any(|y| row(y).chars().next().is_some_and(|c| c.is_ascii_digit())),
         series_labels: timeline.clone().any(|y| {
             let g: String = row(y).chars().take(4).collect();
             g.starts_with("CPU") || g.starts_with("MEM")
@@ -1977,4 +1994,114 @@ fn every_element_yields_monotonically() {
         }
         prev = now;
     }
+}
+
+#[test]
+fn an_idle_machine_still_fills_its_graph() {
+    // A fixed 0..100 axis left the largest panel on screen almost entirely
+    // blank on a machine doing ordinary work. The axis scales to the peak, and
+    // says so.
+    let build = |cpu: f32| {
+        let mut app = App::new(600);
+        for i in (0..200).rev() {
+            let mut s = sample_at(cpu, i);
+            s.mem.used = ((s.mem.total as f32) * 0.1) as u64;
+            app.push(s);
+        }
+        app.theme = Theme::new(Palette::Safe, Tier::TrueColor);
+        app
+    };
+    // Rows of the CPU graph carrying a drawn bar.
+    let filled = |app: &App, h: u16| {
+        let mut term = Terminal::new(TestBackend::new(94, h)).unwrap();
+        term.draw(|f| ui::draw(f, app)).unwrap();
+        let buf = term.backend().buffer();
+        ui::timeline_rows_range(h)
+            .skip(1)
+            .filter(|&y| {
+                (4..94u16).any(|x| {
+                    let s = buf[(x, y)].symbol();
+                    s != " " && s != "\u{2800}"
+                })
+            })
+            .count()
+    };
+    // An idle machine and a saturated one should light a comparable number of
+    // rows, because each is drawn against its own ceiling.
+    let idle = filled(&build(9.0), 16);
+    let busy = filled(&build(95.0), 16);
+    assert!(
+        idle * 2 >= busy,
+        "idle machine lit {idle} rows against a busy machine's {busy}"
+    );
+}
+
+#[test]
+fn the_axis_states_the_ceiling_it_scaled_to() {
+    // Scaling without saying so would be the misleading kind of clever.
+    let gutter_top = |cpu: f32| {
+        let mut app = App::new(600);
+        for i in (0..200).rev() {
+            app.push(sample_at(cpu, i));
+        }
+        app.theme = Theme::new(Palette::Safe, Tier::TrueColor);
+        gutter_text(&app, 100, 14)
+            .lines()
+            .next()
+            .unwrap()
+            .trim()
+            .to_string()
+    };
+    assert_eq!(gutter_top(9.0), "10");
+    assert_eq!(gutter_top(22.0), "25");
+    assert_eq!(gutter_top(44.0), "50");
+    assert_eq!(gutter_top(95.0), "100");
+}
+
+#[test]
+fn the_rules_do_not_mark_a_buffer_that_has_no_data_yet() {
+    // Dashing a reference line across the part of the window that has never
+    // been sampled is noise about a region with nothing to reference.
+    let mut app = App::new(600);
+    for i in (0..20).rev() {
+        app.push(sample_at(95.0, i)); // few samples, wide panel
+    }
+    app.theme = Theme::new(Palette::Safe, Tier::TrueColor);
+
+    let mut term = Terminal::new(TestBackend::new(100, 14)).unwrap();
+    term.draw(|f| ui::draw(f, &app)).unwrap();
+    let buf = term.backend().buffer();
+    // Graph rows only — the range also covers the cursor and legend rows.
+    let range = ui::timeline_rows_range(14);
+    let graph_rows = (range.len() - 1).saturating_sub(2).max(1);
+    // The left third of the graph holds no samples at all.
+    for y in range.start + 1..range.start + 1 + graph_rows as u16 {
+        for x in 4..25u16 {
+            let s = buf[(x, y)].symbol();
+            assert!(
+                s == " " || s == "\u{2800}",
+                "glyph {s:?} drawn at ({x},{y}) where no sample exists"
+            );
+        }
+    }
+}
+
+#[test]
+fn core_meters_are_countable_in_groups() {
+    let mut app = App::new(60);
+    let mut s = sample(50.0);
+    s.cpu_per_core = (0..14).map(|i| (i as f32 * 6.0) % 100.0).collect();
+    app.push(s);
+    app.theme = Theme::new(Palette::Safe, Tier::TrueColor);
+    let mut term = Terminal::new(TestBackend::new(100, 30)).unwrap();
+    term.draw(|f| ui::draw(f, &app)).unwrap();
+    let buf = term.backend().buffer();
+    let row: String = (0..100u16).map(|x| buf[(x, 2)].symbol()).collect();
+    let meters = row.trim_end().split_once("cores ").unwrap().1;
+    // Fourteen cores in groups of four: three gaps.
+    assert_eq!(
+        meters.matches(' ').count(),
+        3,
+        "cores not grouped: {meters:?}"
+    );
 }

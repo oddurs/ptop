@@ -243,6 +243,9 @@ fn heat_scale(width: u16) -> Option<String> {
     (width as usize >= scale.chars().count() + RESERVED).then_some(scale)
 }
 
+/// Cores drawn between gaps.
+const CORE_GROUP: usize = 4;
+
 /// The per-core meters, as one line of the header.
 ///
 /// They were a section of their own: two rows, of which one was a divider and
@@ -273,6 +276,8 @@ fn core_meters(s: &Sample, width: u16, theme: &Theme) -> Line<'static> {
     // guess. Reserving `" +{n}"` while printing `" +{overflow}"` wasted a
     // column, and once the reservation exceeded the room available it produced
     // a marker ratatui then clipped: `16 cores  +1` for sixteen hidden cores.
+    // Gaps are part of the width now, or the overflow count goes wrong again.
+    let with_gaps = |shown: usize| shown + shown.saturating_sub(1) / CORE_GROUP;
     let marker_len = |shown: usize| {
         if shown == n {
             0
@@ -281,7 +286,7 @@ fn core_meters(s: &Sample, width: u16, theme: &Theme) -> Line<'static> {
         }
     };
     let mut shown = n.min(avail);
-    while shown + marker_len(shown) > avail {
+    while with_gaps(shown) + marker_len(shown) > avail {
         if shown == 0 {
             break;
         }
@@ -289,15 +294,20 @@ fn core_meters(s: &Sample, width: u16, theme: &Theme) -> Line<'static> {
     }
     // Even a bare marker does not fit. State the count alone: drawing meters
     // that cannot say how many are missing is the failure this exists to avoid.
-    if shown + marker_len(shown) > avail {
+    if with_gaps(shown) + marker_len(shown) > avail {
         return Line::from(Span::styled(format!("{n} cores"), theme.dim_style()));
     }
 
     let mut spans = vec![Span::styled(label, theme.dim_style())];
-    spans.extend(s.cpu_per_core.iter().take(shown).map(|&pct| {
+    for (i, &pct) in s.cpu_per_core.iter().take(shown).enumerate() {
+        // A gap every four. Fourteen cores drawn solid read as one progress
+        // bar; grouped, they read as fourteen meters, which is what they are.
+        if i > 0 && i % CORE_GROUP == 0 {
+            spans.push(Span::raw(" "));
+        }
         let idx = ((pct / 100.0 * 7.0).round() as usize).min(7);
-        Span::styled(BARS[idx].to_string(), theme.heat_style(pct))
-    }));
+        spans.push(Span::styled(BARS[idx].to_string(), theme.heat_style(pct)));
+    }
     if shown < n {
         spans.push(Span::styled(format!(" +{}", n - shown), theme.dim_style()));
     }
@@ -384,16 +394,27 @@ fn draw_timeline(f: &mut Frame, area: Rect, app: &App) {
         (&cpu_slots, cpu_rows, "CPU", app.theme.series_cpu),
         (&mem_slots, mem_rows, "MEM", app.theme.series_mem),
     ] {
+        // Each graph scales to its own peak: memory at 78% and CPU at 16% are
+        // different questions and deserve different axes.
+        let peak = values.iter().flatten().copied().fold(0.0_f32, f32::max);
+        let ceiling = glyphs::ceiling_for(peak);
         // Both thresholds, not just critical. The warn boundary is the one the
         // roadmap actually asked for, and leaving it hue-only kept it invisible
         // to the commonest colour vision deficiency and on any mono terminal.
         let rules: Vec<(usize, usize)> = [Theme::WARN_PCT, Theme::CRITICAL_PCT]
             .iter()
-            .filter_map(|&pct| glyphs::rule_position(pct, rows))
+            .filter_map(|&pct| glyphs::rule_position_scaled(pct, rows, ceiling))
             .collect();
         for row in 0..rows {
             let rule_level = rules.iter().find(|(r, _)| *r == row).map(|(_, l)| *l);
-            let mut spans = axis_label(row, rows, gutter, &app.theme, labelled.then_some(name));
+            let mut spans = axis_label(
+                row,
+                rows,
+                gutter,
+                &app.theme,
+                labelled.then_some(name),
+                ceiling,
+            );
             spans.extend(
                 glyph_row(
                     GraphRow {
@@ -404,6 +425,7 @@ fn draw_timeline(f: &mut Frame, area: Rect, app: &App) {
                         spc,
                         rule_level,
                         series,
+                        ceiling,
                     },
                     &app.theme,
                 )
@@ -465,11 +487,13 @@ struct GraphRow<'a> {
     rule_level: Option<usize>,
     /// Identity of the series — never a judgement about its value.
     series: Color,
+    /// Top of the y-axis for this graph.
+    ceiling: f32,
 }
 
 /// Draw one row of a graph.
 fn glyph_row(g: GraphRow, theme: &Theme) -> Line<'static> {
-    let (set, values, row, rows, spc, rule_level, series) = (
+    let (set, values, row, rows, spc, rule_level, series, ceiling) = (
         g.set,
         g.values,
         g.row,
@@ -477,14 +501,16 @@ fn glyph_row(g: GraphRow, theme: &Theme) -> Line<'static> {
         g.spc,
         g.rule_level,
         g.series,
+        g.ceiling,
     );
     let spans = values
         .chunks(spc)
         .enumerate()
         .map(|(i, cell)| {
             let pcts: Vec<f32> = cell.iter().map(|v| v.unwrap_or(0.0)).collect();
-            let left = glyphs::level_in_row(pcts[0], row, rows);
-            let right = glyphs::level_in_row(*pcts.get(1).unwrap_or(&pcts[0]), row, rows);
+            let left = glyphs::level_in_row_scaled(pcts[0], row, rows, ceiling);
+            let right =
+                glyphs::level_in_row_scaled(*pcts.get(1).unwrap_or(&pcts[0]), row, rows, ceiling);
             // Colour is identity here, not magnitude — see `Theme::series_style`.
             // The threshold rules now carry "is this bad", which is what the
             // heat ramp was doing redundantly on top of the bar height.
@@ -492,9 +518,14 @@ fn glyph_row(g: GraphRow, theme: &Theme) -> Line<'static> {
             // so it reads as a reference line rather than a row of samples — at
             // the mono tier a solid rule is indistinguishable from a low bar,
             // since both render a dim `⣀`.
+            // A cell with no sample at all is not the same as a cell whose
+            // bar does not reach this row. Drawing the rule across the part of
+            // the buffer that has not been filled yet is noise about a region
+            // where there is nothing to reference.
+            let has_data = cell.iter().any(|v| v.is_some());
             let empty = left.max(right) == 0;
             match rule_level {
-                Some(lvl) if empty && i % 2 == 0 => {
+                Some(lvl) if has_data && empty && i % 2 == 0 => {
                     Span::styled(set.rule_glyph(lvl).to_string(), theme.chrome_style())
                 }
                 _ => Span::styled(
@@ -532,6 +563,7 @@ fn axis_label(
     gutter: usize,
     theme: &Theme,
     series: Option<&str>,
+    ceiling: f32,
 ) -> Vec<Span<'static>> {
     if gutter == 0 {
         return Vec::new();
@@ -551,7 +583,9 @@ fn axis_label(
     let text = if rows < MIN_ROWS_FOR_AXIS {
         String::new()
     } else if row == 0 {
-        "100".to_string()
+        // The ceiling, not a fixed 100 — the axis has to say what it is, or
+        // scaling it would be the misleading kind of clever.
+        format!("{ceiling:.0}")
     } else if row + 1 == rows {
         "0".to_string()
     } else if row == 1 {
