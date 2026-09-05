@@ -233,8 +233,13 @@ fn draw_timeline(f: &mut Frame, area: Rect, app: &App) {
     // change, which is invisible to the most common colour vision deficiency
     // and to anyone on a monochrome terminal. It doubles as the scale anchor
     // the graph otherwise completely lacked.
+    // Whether the gutter can name each series itself. A direct label beats a
+    // legend — the reader stops having to hold "top is cpu" in their head — but
+    // it needs a row that is not already carrying an axis anchor.
+    let labelled = gutter > 0 && cpu_rows >= MIN_ROWS_FOR_LABEL && mem_rows >= MIN_ROWS_FOR_LABEL;
+
     let mut lines: Vec<Line> = Vec::with_capacity(inner_h);
-    for (values, rows) in [(&cpu_slots, cpu_rows), (&mem_slots, mem_rows)] {
+    for (values, rows, name) in [(&cpu_slots, cpu_rows, "CPU"), (&mem_slots, mem_rows, "MEM")] {
         // Both thresholds, not just critical. The warn boundary is the one the
         // roadmap actually asked for, and leaving it hue-only kept it invisible
         // to the commonest colour vision deficiency and on any mono terminal.
@@ -244,7 +249,7 @@ fn draw_timeline(f: &mut Frame, area: Rect, app: &App) {
             .collect();
         for row in 0..rows {
             let rule_level = rules.iter().find(|(r, _)| *r == row).map(|(_, l)| *l);
-            let mut spans = axis_label(row, rows, gutter, &app.theme);
+            let mut spans = axis_label(row, rows, gutter, &app.theme, labelled.then_some(name));
             spans.extend(
                 glyph_row(app.glyphs, values, row, rows, spc, &app.theme, rule_level).spans,
             );
@@ -264,8 +269,12 @@ fn draw_timeline(f: &mut Frame, area: Rect, app: &App) {
 
     if lines.len() < inner_h {
         let span = fmt_lag(Duration::from_secs(window.len() as u64));
+        // Only the identification half is dropped when the gutter names the
+        // series. The span, the slot size and the keys are not a legend and
+        // are not duplicated anywhere else.
+        let ident = if labelled { "" } else { "cpu · mem — " };
         lines.push(Line::from(Span::styled(
-            format!("cpu · mem — {span} shown, {zoom}s/slot — ←/→ scrub, +/- zoom"),
+            format!("{ident}{span} shown, {zoom}s/slot — ←/→ scrub, +/- zoom"),
             app.theme.dim_style(),
         )));
     }
@@ -324,6 +333,8 @@ const MIN_WIDTH_FOR_GUTTER: usize = 30;
 /// A section shorter than this cannot carry both ends of the scale, so it
 /// carries none: see [`axis_label`].
 const MIN_ROWS_FOR_AXIS: usize = 2;
+/// A section needs a row spare — beyond the two anchors — to name itself.
+const MIN_ROWS_FOR_LABEL: usize = 3;
 
 // The gutter must fit inside the panel it is dropped from, or `graph_w`
 // underflows. The two constants are unrelated by construction, so tie them.
@@ -335,10 +346,23 @@ const _: () = assert!(MIN_WIDTH_FOR_GUTTER > GUTTER_W);
 /// anything they could not assume — what they do is anchor the *geometry*, so
 /// a bar's height can be read as a value rather than only compared to its
 /// neighbours.
-fn axis_label(row: usize, rows: usize, gutter: usize, theme: &Theme) -> Vec<Span<'static>> {
+fn axis_label(
+    row: usize,
+    rows: usize,
+    gutter: usize,
+    theme: &Theme,
+    series: Option<&str>,
+) -> Vec<Span<'static>> {
     if gutter == 0 {
         return Vec::new();
     }
+    // The caller decides whether a section is tall enough to name itself. Tie
+    // that decision to this function, or a second caller could pass a label
+    // into a two-row section and watch it silently vanish.
+    debug_assert!(
+        series.is_none() || rows >= MIN_ROWS_FOR_LABEL,
+        "a label was passed to a section with only {rows} rows"
+    );
     // A section only one row tall spans the entire 0..100 range in that row.
     // Labelling its top `100` states that the top of the row is the maximum,
     // which is true, while implying the bottom is not the minimum — and `0`
@@ -350,6 +374,9 @@ fn axis_label(row: usize, rows: usize, gutter: usize, theme: &Theme) -> Vec<Span
         "100".to_string()
     } else if row + 1 == rows {
         "0".to_string()
+    } else if row == 1 {
+        // The first row not already carrying an anchor.
+        series.unwrap_or_default().to_string()
     } else {
         String::new()
     };

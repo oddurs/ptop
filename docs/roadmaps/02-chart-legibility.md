@@ -48,7 +48,7 @@ terminal — covered by the existing `survives_absurdly_small_terminal` test.
 
 ---
 
-## G3 — Direct row labels  ·  `S`
+## G3 — Direct row labels  ·  `S`  ·  **DONE**
 
 **What.** `CPU` and `MEM` in the timeline's left gutter. Delete the
 `cpu (top) · mem (bottom)` legend line.

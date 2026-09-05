@@ -1037,10 +1037,92 @@ fn the_gutter_never_overlaps_the_graph() {
         let y = 1 + row as u16;
         for x in 1..5u16 {
             let s = buf[(x, y)].symbol();
+            // The concrete allowed set, not "any alphanumeric": a future glyph
+            // set that used a letter would otherwise pass this silently.
+            const ALLOWED: [&str; 9] = [" ", "0", "1", "C", "P", "U", "M", "E", "0"];
             assert!(
-                s == " " || s.chars().all(|c| c.is_ascii_digit()),
-                "graph glyph {s:?} drawn inside the gutter at ({x},{y})"
+                ALLOWED.contains(&s),
+                "unexpected glyph {s:?} inside the gutter at ({x},{y})"
             );
         }
+    }
+}
+
+#[test]
+fn the_gutter_names_each_series_directly() {
+    // A direct label beats a legend: the reader stops having to hold
+    // "top is cpu" in their head while reading the graph.
+    let mut app = App::new(600);
+    for i in (0..50).rev() {
+        app.push(sample_at(50.0, i));
+    }
+    app.theme = Theme::new(Palette::Safe, Tier::TrueColor);
+
+    let g = gutter_text(&app, 100, 12);
+    assert!(g.contains("CPU"), "cpu graph is unlabelled:\n{g}");
+    assert!(g.contains("MEM"), "mem graph is unlabelled:\n{g}");
+}
+
+#[test]
+fn the_legend_keeps_identifying_the_series_when_the_gutter_cannot() {
+    // The identification has to live somewhere. When a section is too short to
+    // carry a label, dropping the legend line too would leave the reader with
+    // two anonymous graphs.
+    let mut app = App::new(600);
+    for i in (0..50).rev() {
+        app.push(sample_at(50.0, i));
+    }
+    app.theme = Theme::new(Palette::Safe, Tier::TrueColor);
+
+    let whole = |w: u16, h: u16| {
+        let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
+        term.draw(|f| ui::draw_timeline_for_test(f, f.area(), &app))
+            .unwrap();
+        let buf = term.backend().buffer();
+        (0..h)
+            .map(|y| (0..w).map(|x| buf[(x, y)].symbol()).collect::<String>())
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+
+    // Tall: gutter labels present, legend sheds its identification half.
+    let tall = whole(100, 14);
+    assert!(tall.contains("CPU"));
+    assert!(
+        !tall.contains("cpu · mem"),
+        "legend duplicates the gutter label"
+    );
+
+    // Narrow: no gutter at all, so the legend must still say which is which.
+    let narrow = whole(24, 14);
+    assert!(
+        !narrow.contains("CPU"),
+        "narrow panel should have no gutter"
+    );
+    assert!(
+        narrow.contains("cpu · mem"),
+        "narrow panel dropped both the label and the legend:\n{narrow}"
+    );
+}
+
+#[test]
+#[ignore = "regenerates the README sample frame"]
+fn readme_frame() {
+    let mut app = App::new(600);
+    for i in 0..300 {
+        let t = i as f32;
+        let mut s = sample_at((t * 0.7).sin().abs() * 95.0, 300 - i);
+        s.mem.used = ((8.0 + (t * 0.2).sin() * 3.0) as u64) << 30;
+        app.push(s);
+    }
+    app.history.scrub(-18);
+    app.theme = Theme::new(Palette::Safe, Tier::TrueColor);
+    let mut term = Terminal::new(TestBackend::new(78, 11)).unwrap();
+    term.draw(|f| ui::draw_timeline_for_test(f, f.area(), &app))
+        .unwrap();
+    let buf = term.backend().buffer();
+    for y in 0..buf.area.height {
+        let row: String = (0..buf.area.width).map(|x| buf[(x, y)].symbol()).collect();
+        println!("{}", row.trim_end());
     }
 }
