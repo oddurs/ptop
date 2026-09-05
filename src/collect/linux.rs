@@ -130,7 +130,13 @@ impl ProcFs {
         let text = fs::read_to_string("/proc/meminfo")?;
         let get = |key: &str| -> u64 {
             text.lines()
-                .find_map(|l| l.strip_prefix(key)?.split_whitespace().next()?.parse::<u64>().ok())
+                .find_map(|l| {
+                    l.strip_prefix(key)?
+                        .split_whitespace()
+                        .next()?
+                        .parse::<u64>()
+                        .ok()
+                })
                 .unwrap_or(0)
                 * 1024 // meminfo is in kB
         };
@@ -329,15 +335,24 @@ mod tests {
 
     #[test]
     fn busy_pct_uses_deltas() {
-        let a = CpuTimes { idle: 900, total: 1000 };
-        let b = CpuTimes { idle: 950, total: 1100 };
+        let a = CpuTimes {
+            idle: 900,
+            total: 1000,
+        };
+        let b = CpuTimes {
+            idle: 950,
+            total: 1100,
+        };
         // 100 jiffies passed, 50 idle -> 50% busy
         assert!((b.busy_pct_since(&a) - 50.0).abs() < 0.01);
     }
 
     #[test]
     fn first_read_reports_zero_not_garbage() {
-        let a = CpuTimes { idle: 900, total: 1000 };
+        let a = CpuTimes {
+            idle: 900,
+            total: 1000,
+        };
         assert_eq!(a.busy_pct_since(&a), 0.0);
     }
 
@@ -349,7 +364,9 @@ mod tests {
         // naive whitespace splitting.
         let line = "1234 ((evil) proc)) S 1 0 0 0 -1 4194560 100 0 0 0 \
                     55 45 0 0 20 0 8 0 12345 1000 512 0 0 0 0 0 0 0 0 0 0 0 0";
-        let p = pf.parse_proc_stat(1234, line, 1.0, Arc::from("root"), &mut seen).unwrap();
+        let p = pf
+            .parse_proc_stat(1234, line, 1.0, Arc::from("root"), &mut seen)
+            .unwrap();
         assert_eq!(p.name, "(evil) proc)");
         assert_eq!(p.ppid, 1);
         assert_eq!(p.threads, 8);
@@ -362,7 +379,9 @@ mod tests {
         let mut seen = HashMap::new();
         let line = "1 (init) S 0 0 0 0 -1 4194560 100 0 0 0 \
                     55 45 0 0 20 0 1 0 12345 1000 512 0 0 0 0 0 0 0 0 0 0 0 0";
-        let p = pf.parse_proc_stat(1, line, 1.0, Arc::from("root"), &mut seen).unwrap();
+        let p = pf
+            .parse_proc_stat(1, line, 1.0, Arc::from("root"), &mut seen)
+            .unwrap();
         assert_eq!(p.cpu, 0.0);
         assert_eq!(seen.get(&1), Some(&100)); // 55 + 45 recorded for next time
     }
@@ -377,7 +396,9 @@ mod tests {
         let mut seen = HashMap::new();
         let line = "7 (reused) S 0 0 0 0 -1 0 0 0 0 0 \
                     500000 1 0 0 20 0 1 0 1 1000 512 0 0 0 0 0 0 0 0 0 0 0 0";
-        let p = pf.parse_proc_stat(7, line, 1.0, Arc::from("root"), &mut seen).unwrap();
+        let p = pf
+            .parse_proc_stat(7, line, 1.0, Arc::from("root"), &mut seen)
+            .unwrap();
         assert_eq!(p.cpu, 400.0, "must clamp to cores * 100");
     }
 
@@ -390,7 +411,9 @@ mod tests {
         // 100 total jiffies now, 50 before -> 50 jiffies in 1s at 100Hz = 50%
         let line = "1 (init) S 0 0 0 0 -1 4194560 100 0 0 0 \
                     55 45 0 0 20 0 1 0 12345 1000 512 0 0 0 0 0 0 0 0 0 0 0 0";
-        let p = pf.parse_proc_stat(1, line, 1.0, Arc::from("root"), &mut seen).unwrap();
+        let p = pf
+            .parse_proc_stat(1, line, 1.0, Arc::from("root"), &mut seen)
+            .unwrap();
         assert!((p.cpu - 50.0).abs() < 0.01);
     }
 }

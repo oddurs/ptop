@@ -61,7 +61,14 @@ pub fn build<'a>(
     let mut out = Vec::with_capacity(procs.len());
     let mut visited = HashSet::new();
     for (i, root) in roots.iter().enumerate() {
-        walk(root, &children, &mut visited, &mut out, &mut Vec::new(), i + 1 == roots.len());
+        walk(
+            root,
+            &children,
+            &mut visited,
+            &mut out,
+            &mut Vec::new(),
+            i + 1 == roots.len(),
+        );
     }
 
     // Anything still unvisited is caught in a ppid cycle: every member has a
@@ -72,7 +79,11 @@ pub fn build<'a>(
         .filter(|p| keep(p.pid) && !visited.contains(&p.pid))
         .collect();
     for p in stranded {
-        out.push(TreeRow { proc: p, prefix: String::new(), context_only: false });
+        out.push(TreeRow {
+            proc: p,
+            prefix: String::new(),
+            context_only: false,
+        });
     }
 
     if let Some(m) = matched {
@@ -128,12 +139,23 @@ fn walk<'a>(
         s
     };
 
-    out.push(TreeRow { proc: node, prefix, context_only: false });
+    out.push(TreeRow {
+        proc: node,
+        prefix,
+        context_only: false,
+    });
 
     if let Some(kids) = children.get(&node.pid) {
         ancestors_last.push(is_last);
         for (i, kid) in kids.iter().enumerate() {
-            walk(kid, children, visited, out, ancestors_last, i + 1 == kids.len());
+            walk(
+                kid,
+                children,
+                visited,
+                out,
+                ancestors_last,
+                i + 1 == kids.len(),
+            );
         }
         ancestors_last.pop();
     }
@@ -213,7 +235,14 @@ mod tests {
     #[test]
     fn every_process_appears_exactly_once() {
         let procs: Vec<ProcSample> = (1..=50)
-            .map(|i| p(i, if i == 1 { 0 } else { i / 2 }, &format!("p{i}"), i as f32))
+            .map(|i| {
+                p(
+                    i,
+                    if i == 1 { 0 } else { i / 2 },
+                    &format!("p{i}"),
+                    i as f32,
+                )
+            })
             .collect();
         let rows = build(&procs, Sort::Cpu, None);
         assert_eq!(rows.len(), 50);
@@ -253,9 +282,6 @@ mod tests {
             .map(|i| p(i, i - 1, &format!("d{i}"), 0.0))
             .collect();
         let rows = build(&procs, Sort::Pid, None);
-        assert_eq!(
-            names(&rows),
-            vec!["d1", "└─ d2", "   └─ d3", "      └─ d4"]
-        );
+        assert_eq!(names(&rows), vec!["d1", "└─ d2", "   └─ d3", "      └─ d4"]);
     }
 }

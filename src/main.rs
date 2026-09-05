@@ -136,7 +136,11 @@ fn once(collector: &mut impl Collector) -> io::Result<()> {
     std::thread::sleep(SAMPLE_INTERVAL);
     let s = collector.sample()?;
 
-    println!("cpu    {:.1}%  ({} cores)", s.cpu_total, s.cpu_per_core.len());
+    println!(
+        "cpu    {:.1}%  ({} cores)",
+        s.cpu_total,
+        s.cpu_per_core.len()
+    );
     println!(
         "mem    {:.1}%  {} / {} used, {} available",
         s.mem.used_pct(),
@@ -159,7 +163,13 @@ fn once(collector: &mut impl Collector) -> io::Result<()> {
     top.sort_by(|a, b| b.cpu.total_cmp(&a.cpu));
     println!("\n{:>7}  {:>6}  {:>9}  COMMAND", "PID", "CPU%", "RSS");
     for p in top.iter().take(10) {
-        println!("{:>7}  {:>6.1}  {:>9}  {}", p.pid, p.cpu, human(p.rss), p.name);
+        println!(
+            "{:>7}  {:>6.1}  {:>9}  {}",
+            p.pid,
+            p.cpu,
+            human(p.rss),
+            p.name
+        );
     }
     Ok(())
 }
@@ -189,9 +199,10 @@ fn run(
         let timeout = SAMPLE_INTERVAL.saturating_sub(last_sample.elapsed());
         if event::poll(timeout)?
             && let Event::Key(key) = event::read()?
-                && key.kind == KeyEventKind::Press {
-                    handle_key(app, key.code, key.modifiers);
-                }
+            && key.kind == KeyEventKind::Press
+        {
+            handle_key(app, key.code, key.modifiers);
+        }
 
         if last_sample.elapsed() >= SAMPLE_INTERVAL {
             // Sampling continues while paused — that is the whole point. The
@@ -231,12 +242,20 @@ fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
         // Scrubbing. Shift jumps ten samples at a time for crossing a long
         // buffer without holding the key down.
         KeyCode::Left | KeyCode::Char('h') => {
-            let step = if mods.contains(KeyModifiers::SHIFT) { 10 } else { 1 };
+            let step = if mods.contains(KeyModifiers::SHIFT) {
+                10
+            } else {
+                1
+            };
             app.history.scrub(-step);
             app.clamp_selection();
         }
         KeyCode::Right | KeyCode::Char('l') => {
-            let step = if mods.contains(KeyModifiers::SHIFT) { 10 } else { 1 };
+            let step = if mods.contains(KeyModifiers::SHIFT) {
+                10
+            } else {
+                1
+            };
             app.history.scrub(step);
             app.clamp_selection();
         }

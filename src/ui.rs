@@ -16,11 +16,11 @@ const BARS: [char; 8] = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█']
 
 pub fn draw(f: &mut Frame, app: &App) {
     let chunks = Layout::vertical([
-        Constraint::Length(3), // header
-        Constraint::Length(3), // cores
+        Constraint::Length(3),  // header
+        Constraint::Length(3),  // cores
         Constraint::Length(10), // timeline
-        Constraint::Min(5),    // processes
-        Constraint::Length(1), // help
+        Constraint::Min(5),     // processes
+        Constraint::Length(1),  // help
     ])
     .split(f.area());
 
@@ -94,13 +94,17 @@ fn draw_header(f: &mut Frame, area: Rect, app: &App, s: &Sample) {
         Span::styled("CPU ", Style::default().add_modifier(Modifier::DIM)),
         Span::styled(
             format!("{:>5.1}%", s.cpu_total),
-            Style::default().fg(heat(s.cpu_total)).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(heat(s.cpu_total))
+                .add_modifier(Modifier::BOLD),
         ),
         Span::raw("   "),
         Span::styled("MEM ", Style::default().add_modifier(Modifier::DIM)),
         Span::styled(
             format!("{:>5.1}%", mem_pct),
-            Style::default().fg(heat(mem_pct)).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(heat(mem_pct))
+                .add_modifier(Modifier::BOLD),
         ),
         Span::styled(
             format!(
@@ -114,7 +118,10 @@ fn draw_header(f: &mut Frame, area: Rect, app: &App, s: &Sample) {
     ];
 
     if s.mem.swap_total > 0 {
-        spans.push(Span::styled("   SWP ", Style::default().add_modifier(Modifier::DIM)));
+        spans.push(Span::styled(
+            "   SWP ",
+            Style::default().add_modifier(Modifier::DIM),
+        ));
         spans.push(Span::styled(
             format!("{:>5.1}%", s.mem.swap_pct()),
             Style::default().fg(heat(s.mem.swap_pct())),
@@ -123,7 +130,10 @@ fn draw_header(f: &mut Frame, area: Rect, app: &App, s: &Sample) {
 
     spans.extend([
         Span::styled("   LOAD ", Style::default().add_modifier(Modifier::DIM)),
-        Span::raw(format!("{:.2} {:.2} {:.2}", s.load[0], s.load[1], s.load[2])),
+        Span::raw(format!(
+            "{:.2} {:.2} {:.2}",
+            s.load[0], s.load[1], s.load[2]
+        )),
         Span::styled("   UP ", Style::default().add_modifier(Modifier::DIM)),
         Span::raw(fmt_uptime(s.uptime)),
         Span::styled("   PROCS ", Style::default().add_modifier(Modifier::DIM)),
@@ -131,13 +141,21 @@ fn draw_header(f: &mut Frame, area: Rect, app: &App, s: &Sample) {
     ]);
 
     let title = if app.history.is_live() {
-        Span::styled(" ptop — LIVE ", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD))
+        Span::styled(
+            " ptop — LIVE ",
+            Style::default()
+                .fg(Color::Green)
+                .add_modifier(Modifier::BOLD),
+        )
     } else {
         // Loud on purpose: reading a stale process table as the current one is
         // the single worst thing this tool could let you do.
         Span::styled(
             format!(" ptop — PAUSED  -{} ", fmt_lag(app.history.time_behind())),
-            Style::default().fg(Color::Black).bg(Color::Yellow).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(Color::Black)
+                .bg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
         )
     };
 
@@ -236,7 +254,13 @@ fn draw_timeline(f: &mut Frame, area: Rect, app: &App) {
 }
 
 /// One row of graph. `row` counts from the top of a `rows`-tall graph.
-fn glyph_row(set: GlyphSet, values: &[Option<f32>], row: usize, rows: usize, spc: usize) -> Line<'static> {
+fn glyph_row(
+    set: GlyphSet,
+    values: &[Option<f32>],
+    row: usize,
+    rows: usize,
+    spc: usize,
+) -> Line<'static> {
     let spans = values
         .chunks(spc)
         .map(|cell| {
@@ -286,7 +310,9 @@ fn cursor_row(
     }
     Line::from(Span::styled(
         row.into_iter().collect::<String>(),
-        Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+        Style::default()
+            .fg(Color::Yellow)
+            .add_modifier(Modifier::BOLD),
     ))
 }
 
@@ -359,7 +385,10 @@ fn draw_help(f: &mut Frame, area: Rect, app: &App) {
             Span::styled("filter: ", Style::default().fg(Color::Yellow)),
             Span::raw(&app.filter),
             Span::styled("█", Style::default().fg(Color::Yellow)),
-            Span::styled("   (Enter/Esc to finish)", Style::default().add_modifier(Modifier::DIM)),
+            Span::styled(
+                "   (Enter/Esc to finish)",
+                Style::default().add_modifier(Modifier::DIM),
+            ),
         ])
     } else {
         Line::from(Span::styled(

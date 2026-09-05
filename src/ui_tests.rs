@@ -98,7 +98,10 @@ fn paused_state_is_visibly_marked() {
     app.history.scrub(-4);
     let out = render(&app, 100, 30);
     assert!(out.contains("PAUSED"), "paused view must not look live");
-    assert!(out.contains("-4s"), "paused badge must report real elapsed lag");
+    assert!(
+        out.contains("-4s"),
+        "paused badge must report real elapsed lag"
+    );
     assert!(
         out.contains('▌') || out.contains('▐'),
         "scrub cursor must be visible without colour"
@@ -120,7 +123,11 @@ fn sort_by_mem_puts_the_biggest_process_first() {
     let mut app = App::new(60);
     app.push(sample(10.0));
     app.sort = crate::app::Sort::Mem;
-    let names: Vec<&str> = app.visible_rows().iter().map(|r| r.proc.name.as_str()).collect();
+    let names: Vec<&str> = app
+        .visible_rows()
+        .iter()
+        .map(|r| r.proc.name.as_str())
+        .collect();
     assert_eq!(names, vec!["postgres", "nginx", "init"]);
 }
 
@@ -168,7 +175,8 @@ fn show_frame() {
         }
         println!("\n=== {label} ===");
         let mut term = Terminal::new(TestBackend::new(100, 12)).unwrap();
-        term.draw(|f| ui::draw_timeline_for_test(f, f.area(), &a)).unwrap();
+        term.draw(|f| ui::draw_timeline_for_test(f, f.area(), &a))
+            .unwrap();
         let buf = term.backend().buffer();
         for y in 0..buf.area.height {
             let row: String = (0..buf.area.width).map(|x| buf[(x, y)].symbol()).collect();
@@ -189,9 +197,15 @@ fn cursor_marker_picks_the_correct_half_of_a_cell() {
 
     // Newest is slot 7 (right half of cell 3); one back is slot 6 (left half).
     app.history.scrub(-1);
-    assert!(render(&app, 100, 30).contains('▌'), "odd offset is a left half");
+    assert!(
+        render(&app, 100, 30).contains('▌'),
+        "odd offset is a left half"
+    );
     app.history.scrub(-1);
-    assert!(render(&app, 100, 30).contains('▐'), "even offset is a right half");
+    assert!(
+        render(&app, 100, 30).contains('▐'),
+        "even offset is a right half"
+    );
 }
 
 #[test]
@@ -280,7 +294,8 @@ fn timeline_fills_its_panel_with_no_blank_rows() {
         app.push(sample_at(50.0, i));
     }
     let mut term = Terminal::new(TestBackend::new(60, 10)).unwrap();
-    term.draw(|f| ui::draw_timeline_for_test(f, f.area(), &app)).unwrap();
+    term.draw(|f| ui::draw_timeline_for_test(f, f.area(), &app))
+        .unwrap();
     let buf = term.backend().buffer();
     // Rows 1..=8 are inside the border; none may be entirely empty.
     for y in 1..9 {
@@ -344,10 +359,17 @@ fn show_real_tree() {
     app.sort = crate::app::Sort::Pid;
 
     let rows = app.visible_rows();
-    println!("{} processes, {} rows", app.history.current().unwrap().procs.len(), rows.len());
+    println!(
+        "{} processes, {} rows",
+        app.history.current().unwrap().procs.len(),
+        rows.len()
+    );
     let depth = |r: &crate::tree::TreeRow| r.prefix.chars().count() / 3;
     println!("max depth: {}", rows.iter().map(depth).max().unwrap_or(0));
-    println!("roots: {}", rows.iter().filter(|r| r.prefix.is_empty()).count());
+    println!(
+        "roots: {}",
+        rows.iter().filter(|r| r.prefix.is_empty()).count()
+    );
     for r in rows.iter().take(28) {
         println!("{:>7} {}{}", r.proc.pid, r.prefix, r.proc.name);
     }
