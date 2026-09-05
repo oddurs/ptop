@@ -15,7 +15,7 @@ fn proc_named(pid: i32, name: &str, cpu: f32, rss: u64) -> ProcSample {
         pid,
         ppid: 1,
         name: name.into(),
-        user: "root".into(),
+        user: std::sync::Arc::from("root"),
         cpu,
         rss,
         threads: 1,

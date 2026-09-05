@@ -262,7 +262,7 @@ fn draw_procs(f: &mut Frame, area: Rect, app: &App) {
             };
             Row::new(vec![
                 Cell::from(p.pid.to_string()),
-                Cell::from(p.user.clone()),
+                Cell::from(p.user.to_string()),
                 Cell::from(format!("{:.1}", p.cpu)).style(Style::default().fg(heat(p.cpu))),
                 Cell::from(fmt_bytes(p.rss)),
                 Cell::from(p.state.to_string()),

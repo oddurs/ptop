@@ -41,6 +41,7 @@ cargo build --release
 | `/` | filter by name or pid |
 
 `ptop --once` prints a single plain-text sample and exits, for scripts and cron.
+`ptop --bench` times 20 collection passes, for checking the cost of a change.
 
 ## How it works
 
@@ -65,6 +66,40 @@ would silently drift forward through time while appearing to stay put.
 
 Ten minutes of scrollback at one sample per second, which is roughly 30 MB of
 process tables on a busy machine.
+
+## Notes from reading the others
+
+Lessons taken from htop, btop, and bottom, with the measurements that backed
+them:
+
+- **Cache what doesn't change.** htop reads a process's cmdline and start time
+  once per process *lifetime*, not once per sample, and gets the uid from a
+  single `fstat` on the `/proc/<pid>` directory rather than parsing
+  `/proc/<pid>/status`. ptop originally parsed that file for every process every
+  second: at 400 processes that was 58% of total collection time. Switching to
+  `fstat` took a sample from 3.19ms to 1.41ms.
+- **Clamp CPU percentages.** htop does `MINIMUM(percent_cpu, activeCPUs * 100)`.
+  Without it, a pid reused between two samples diffs the new process against the
+  old one's counter and reports thousands of percent. ptop now clamps the same
+  way.
+- **Guard the sample interval.** htop carries the comment "period might be 0
+  after system sleep" — a real bug someone hit on a laptop, worth knowing about
+  before it happens to you.
+- **Only collect what is displayed.** htop gates expensive reads behind
+  `PROCESS_FLAG_*` bits derived from the visible columns, so turning off a
+  column stops the syscalls behind it. ptop collects everything unconditionally;
+  this is the right shape to adopt before adding per-process IO and network.
+- **Spread expensive work across samples.** For costly `/proc/<pid>/maps`
+  parsing htop re-checks each process on a randomised interval rather than doing
+  every process on the same tick, which avoids a periodic stall.
+- **Have a fallback glyph set.** btop keeps a `tty_mode` symbol table for
+  terminals that cannot render braille. Any Unicode-dependent drawing needs a
+  plain-ASCII path.
+
+Not adopted yet, in rough priority order: braille timeline rendering (btop packs
+two samples per character cell, which would double the visible history window at
+the cost of halving vertical resolution and needing that ASCII fallback);
+column-driven collection flags; the process tree.
 
 ## Status
 

@@ -28,6 +28,7 @@ ptop — a system monitor you can rewind
 USAGE:
     ptop            interactive mode
     ptop --once     print one plain-text sample and exit
+    ptop --bench    time 20 collection passes (development)
 
 OPTIONS:
     -h, --help      show this help
@@ -54,6 +55,18 @@ fn main() -> io::Result<()> {
 
     match args.first().map(String::as_str) {
         Some("--once") => return once(&mut collector),
+        Some("--bench") => {
+            collector.sample()?;
+            let n = 20;
+            let t0 = std::time::Instant::now();
+            let mut count = 0;
+            for _ in 0..n {
+                count = collector.sample()?.procs.len();
+            }
+            let per = t0.elapsed() / n;
+            println!("{count} procs, {:?}/sample", per);
+            return Ok(());
+        }
         Some("--help" | "-h") => {
             println!("{USAGE}");
             return Ok(());

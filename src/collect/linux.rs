@@ -9,6 +9,8 @@ use crate::sample::{MemStat, ProcSample, Sample};
 use std::collections::HashMap;
 use std::fs;
 use std::io;
+use std::os::unix::fs::MetadataExt;
+use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
 /// Raw jiffy counters from one `/proc/stat` CPU line.
@@ -59,7 +61,7 @@ pub struct ProcFs {
     prev_proc_jiffies: HashMap<i32, u64>,
     prev_at: Option<SystemTime>,
     /// uid -> username, parsed once from /etc/passwd.
-    users: HashMap<u32, String>,
+    users: HashMap<u32, Arc<str>>,
     ticks_per_sec: f64,
     page_size: u64,
 }
@@ -185,7 +187,15 @@ impl ProcFs {
             let Ok(stat) = fs::read_to_string(format!("/proc/{pid}/stat")) else {
                 continue;
             };
-            let Some(p) = self.parse_proc_stat(pid, &stat, elapsed_secs, &mut seen) else {
+
+            // The /proc/<pid> directory is owned by the process's uid, so one
+            // stat answers what parsing /proc/<pid>/status also would — and
+            // measurably cheaper: reading that file for every process every
+            // second was 58% of total collection time.
+            let uid = entry.metadata().map(|m| m.uid()).unwrap_or(0);
+            let user = self.user_for_uid(uid);
+
+            let Some(p) = self.parse_proc_stat(pid, &stat, elapsed_secs, user, &mut seen) else {
                 continue;
             };
             out.push(p);
@@ -197,11 +207,21 @@ impl ProcFs {
         Ok(out)
     }
 
+    fn user_for_uid(&mut self, uid: u32) -> Arc<str> {
+        // Unknown uids (containers, LDAP, no /etc/passwd entry) get memoised in
+        // numeric form so the fallback allocates once, not once per sample.
+        self.users
+            .entry(uid)
+            .or_insert_with(|| Arc::from(uid.to_string().as_str()))
+            .clone()
+    }
+
     fn parse_proc_stat(
         &self,
         pid: i32,
         stat: &str,
         elapsed_secs: f64,
+        user: Arc<str>,
         seen: &mut HashMap<i32, u64>,
     ) -> Option<ProcSample> {
         // Field 2 is the executable name in parentheses, and it may contain
@@ -227,7 +247,12 @@ impl ProcFs {
         let cpu = match self.prev_proc_jiffies.get(&pid) {
             Some(&prev) if elapsed_secs > 0.0 => {
                 let dj = jiffies.saturating_sub(prev) as f64;
-                ((dj / self.ticks_per_sec / elapsed_secs) * 100.0) as f32
+                let pct = ((dj / self.ticks_per_sec / elapsed_secs) * 100.0) as f32;
+                // Clamp to the total the machine can actually deliver. A pid
+                // reused between samples diffs the new process against the old
+                // one's counter and can otherwise report thousands of percent.
+                // htop guards the same way.
+                pct.min(self.core_count() as f32 * 100.0)
             }
             _ => 0.0,
         };
@@ -236,7 +261,7 @@ impl ProcFs {
             pid,
             ppid,
             name: comm,
-            user: self.user_for(pid),
+            user,
             cpu,
             rss: rss_pages * self.page_size,
             threads,
@@ -244,31 +269,15 @@ impl ProcFs {
         })
     }
 
-    fn user_for(&self, pid: i32) -> String {
-        let Ok(status) = fs::read_to_string(format!("/proc/{pid}/status")) else {
-            return "?".into();
-        };
-        let uid = status.lines().find_map(|l| {
-            l.strip_prefix("Uid:")?
-                .split_whitespace()
-                .next()?
-                .parse::<u32>()
-                .ok()
-        });
-        match uid {
-            Some(u) => self
-                .users
-                .get(&u)
-                .cloned()
-                .unwrap_or_else(|| u.to_string()),
-            None => "?".into(),
-        }
+    /// Cores seen in the last /proc/stat read; 1 before the first read.
+    fn core_count(&self) -> usize {
+        self.prev_cores.len().max(1)
     }
 }
 
 /// uid -> name, from /etc/passwd. Good enough without NSS; unknown uids fall
 /// back to their numeric form at lookup time.
-fn parse_passwd() -> HashMap<u32, String> {
+fn parse_passwd() -> HashMap<u32, Arc<str>> {
     let mut map = HashMap::new();
     if let Ok(text) = fs::read_to_string("/etc/passwd") {
         for line in text.lines() {
@@ -277,7 +286,7 @@ fn parse_passwd() -> HashMap<u32, String> {
                 continue;
             };
             if let Ok(uid) = uid.parse() {
-                map.insert(uid, name.to_string());
+                map.insert(uid, Arc::from(name));
             }
         }
     }
@@ -340,7 +349,7 @@ mod tests {
         // naive whitespace splitting.
         let line = "1234 ((evil) proc)) S 1 0 0 0 -1 4194560 100 0 0 0 \
                     55 45 0 0 20 0 8 0 12345 1000 512 0 0 0 0 0 0 0 0 0 0 0 0";
-        let p = pf.parse_proc_stat(1234, line, 1.0, &mut seen).unwrap();
+        let p = pf.parse_proc_stat(1234, line, 1.0, Arc::from("root"), &mut seen).unwrap();
         assert_eq!(p.name, "(evil) proc)");
         assert_eq!(p.ppid, 1);
         assert_eq!(p.threads, 8);
@@ -353,20 +362,35 @@ mod tests {
         let mut seen = HashMap::new();
         let line = "1 (init) S 0 0 0 0 -1 4194560 100 0 0 0 \
                     55 45 0 0 20 0 1 0 12345 1000 512 0 0 0 0 0 0 0 0 0 0 0 0";
-        let p = pf.parse_proc_stat(1, line, 1.0, &mut seen).unwrap();
+        let p = pf.parse_proc_stat(1, line, 1.0, Arc::from("root"), &mut seen).unwrap();
         assert_eq!(p.cpu, 0.0);
         assert_eq!(seen.get(&1), Some(&100)); // 55 + 45 recorded for next time
     }
 
     #[test]
+    fn proc_cpu_is_clamped_when_a_pid_is_reused() {
+        let mut pf = ProcFs::new().unwrap();
+        pf.prev_cores = vec![CpuTimes::default(); 4];
+        // The previous occupant of this pid had barely run; the new one shows a
+        // huge cumulative counter, so the naive delta is ~500000%.
+        pf.prev_proc_jiffies.insert(7, 1);
+        let mut seen = HashMap::new();
+        let line = "7 (reused) S 0 0 0 0 -1 0 0 0 0 0 \
+                    500000 1 0 0 20 0 1 0 1 1000 512 0 0 0 0 0 0 0 0 0 0 0 0";
+        let p = pf.parse_proc_stat(7, line, 1.0, Arc::from("root"), &mut seen).unwrap();
+        assert_eq!(p.cpu, 400.0, "must clamp to cores * 100");
+    }
+
+    #[test]
     fn proc_cpu_from_jiffy_delta() {
         let mut pf = ProcFs::new().unwrap();
+        pf.prev_cores = vec![CpuTimes::default(); 4];
         pf.prev_proc_jiffies.insert(1, 50);
         let mut seen = HashMap::new();
         // 100 total jiffies now, 50 before -> 50 jiffies in 1s at 100Hz = 50%
         let line = "1 (init) S 0 0 0 0 -1 4194560 100 0 0 0 \
                     55 45 0 0 20 0 1 0 12345 1000 512 0 0 0 0 0 0 0 0 0 0 0 0";
-        let p = pf.parse_proc_stat(1, line, 1.0, &mut seen).unwrap();
+        let p = pf.parse_proc_stat(1, line, 1.0, Arc::from("root"), &mut seen).unwrap();
         assert!((p.cpu - 50.0).abs() < 0.01);
     }
 }

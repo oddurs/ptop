@@ -48,8 +48,8 @@ impl Collector for SysinfoCollector {
                 user: p
                     .user_id()
                     .and_then(|uid| self.users.get_user_by_id(uid))
-                    .map(|u| u.name().to_string())
-                    .unwrap_or_else(|| "?".into()),
+                    .map(|u| std::sync::Arc::from(u.name()))
+                    .unwrap_or_else(|| std::sync::Arc::from("?")),
                 cpu: p.cpu_usage(),
                 rss: p.memory(),
                 // sysinfo exposes tasks only on Linux, where we use the other

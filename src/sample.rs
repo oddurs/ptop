@@ -6,6 +6,7 @@
 //! possible — the process table you see at t-40s is the real one from t-40s,
 //! not an interpolation.
 
+use std::sync::Arc;
 use std::time::SystemTime;
 
 /// Memory figures, all in bytes.
@@ -44,7 +45,10 @@ pub struct ProcSample {
     #[allow(dead_code)]
     pub ppid: i32,
     pub name: String,
-    pub user: String,
+    /// Shared: a few distinct users repeat across every process in every
+    /// retained sample, so the ring buffer holds one allocation each, not one
+    /// per row per second.
+    pub user: Arc<str>,
     /// Percent of one core. Can exceed 100 for threaded processes.
     pub cpu: f32,
     /// Resident set size in bytes.
