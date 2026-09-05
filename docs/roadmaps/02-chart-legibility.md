@@ -139,7 +139,7 @@ live view does not shuffle. Zoom continues to work at any scroll position.
 
 ---
 
-## G6 — Scale legend for retained heat  ·  `S`
+## G6 — Scale legend for retained heat  ·  `S`  ·  **DONE**
 
 **What.** Wherever a heat ramp survives `G5`, show its thresholds once —
 e.g. `50 / 80` beside the core meters.

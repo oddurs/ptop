@@ -146,7 +146,7 @@ fn draw_header(f: &mut Frame, area: Rect, app: &App, s: &Sample) {
         Span::raw(s.procs.len().to_string()),
     ]);
 
-    let title = if app.history.is_live() {
+    let state = if app.history.is_live() {
         Span::styled(" ptop — LIVE ", app.theme.live_style())
     } else {
         // Loud on purpose: reading a stale process table as the current one is
@@ -156,6 +156,15 @@ fn draw_header(f: &mut Frame, area: Rect, app: &App, s: &Sample) {
             app.theme.paused_style(),
         )
     };
+
+    // The heat scale lives here rather than on the cores panel, which is not
+    // drawn at all on a host with no per-core data — leaving the ramp that
+    // still colours these very figures with its thresholds stated nowhere.
+    let mut title = vec![state];
+    if let Some(scale) = heat_scale(area.width) {
+        title.push(Span::styled(scale, app.theme.dim_style()));
+    }
+    let title = Line::from(title);
 
     f.render_widget(
         Paragraph::new(Line::from(spans)).block(
@@ -169,6 +178,28 @@ fn draw_header(f: &mut Frame, area: Rect, app: &App, s: &Sample) {
         ),
         area,
     );
+}
+
+/// The heat ramp's scale, when the panel is wide enough to carry it.
+///
+/// Semantic heat is a legitimate multi-hue ramp, but only with its scale
+/// stated. After G5 the ramp survives in three places — the header figures,
+/// the core meters and the process table's CPU column — and the numbers behind
+/// the colour change appeared nowhere in the UI. They are the same thresholds
+/// the timeline draws rules at, so saying them once is enough.
+///
+/// Measured in columns, not bytes: `·` is two bytes and one column, so byte
+/// length silently over-reserves, and would be three times wrong if the text
+/// ever gained a wide character.
+fn heat_scale(width: u16) -> Option<String> {
+    let scale = format!(
+        "· warn {:.0} · crit {:.0} ",
+        Theme::WARN_PCT,
+        Theme::CRITICAL_PCT
+    );
+    // Two columns for the panel's own borders, plus room for the state badge.
+    const RESERVED: usize = 2 + 24;
+    (width as usize >= scale.chars().count() + RESERVED).then_some(scale)
 }
 
 fn draw_cores(f: &mut Frame, area: Rect, s: &Sample, theme: &Theme) {
