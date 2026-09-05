@@ -44,7 +44,7 @@ byte-identical to today under the default theme (assert with an existing
 
 ---
 
-## C2 — Colour tiers with capability detection  ·  `M`
+## C2 — Colour tiers with capability detection  ·  `M`  ·  **DONE**
 
 **What.** Three tiers, each independently complete: **monochrome** (usable),
 **ANSI-16** (readable), **256/truecolor** (intended). Detect via `COLORTERM`

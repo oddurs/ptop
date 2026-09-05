@@ -82,20 +82,16 @@ fn fmt_uptime(d: Duration) -> String {
 fn draw_header(f: &mut Frame, area: Rect, app: &App, s: &Sample) {
     let mem_pct = s.mem.used_pct();
     let mut spans = vec![
-        Span::styled("CPU ", Style::default().add_modifier(Modifier::DIM)),
+        Span::styled("CPU ", app.theme.dim_style()),
         Span::styled(
             format!("{:>5.1}%", s.cpu_total),
-            Style::default()
-                .fg(app.theme.heat(s.cpu_total))
-                .add_modifier(Modifier::BOLD),
+            app.theme.figure_style(s.cpu_total),
         ),
         Span::raw("   "),
-        Span::styled("MEM ", Style::default().add_modifier(Modifier::DIM)),
+        Span::styled("MEM ", app.theme.dim_style()),
         Span::styled(
             format!("{:>5.1}%", mem_pct),
-            Style::default()
-                .fg(app.theme.heat(mem_pct))
-                .add_modifier(Modifier::BOLD),
+            app.theme.figure_style(mem_pct),
         ),
         Span::styled(
             format!(
@@ -104,49 +100,38 @@ fn draw_header(f: &mut Frame, area: Rect, app: &App, s: &Sample) {
                 fmt_bytes(s.mem.total),
                 fmt_bytes(s.mem.available)
             ),
-            Style::default().add_modifier(Modifier::DIM),
+            app.theme.dim_style(),
         ),
     ];
 
     if s.mem.swap_total > 0 {
-        spans.push(Span::styled(
-            "   SWP ",
-            Style::default().add_modifier(Modifier::DIM),
-        ));
+        spans.push(Span::styled("   SWP ", app.theme.dim_style()));
         spans.push(Span::styled(
             format!("{:>5.1}%", s.mem.swap_pct()),
-            Style::default().fg(app.theme.heat(s.mem.swap_pct())),
+            app.theme.heat_style(s.mem.swap_pct()),
         ));
     }
 
     spans.extend([
-        Span::styled("   LOAD ", Style::default().add_modifier(Modifier::DIM)),
+        Span::styled("   LOAD ", app.theme.dim_style()),
         Span::raw(format!(
             "{:.2} {:.2} {:.2}",
             s.load[0], s.load[1], s.load[2]
         )),
-        Span::styled("   UP ", Style::default().add_modifier(Modifier::DIM)),
+        Span::styled("   UP ", app.theme.dim_style()),
         Span::raw(fmt_uptime(s.uptime)),
-        Span::styled("   PROCS ", Style::default().add_modifier(Modifier::DIM)),
+        Span::styled("   PROCS ", app.theme.dim_style()),
         Span::raw(s.procs.len().to_string()),
     ]);
 
     let title = if app.history.is_live() {
-        Span::styled(
-            " ptop — LIVE ",
-            Style::default()
-                .fg(app.theme.live)
-                .add_modifier(Modifier::BOLD),
-        )
+        Span::styled(" ptop — LIVE ", app.theme.live_style())
     } else {
         // Loud on purpose: reading a stale process table as the current one is
         // the single worst thing this tool could let you do.
         Span::styled(
             format!(" ptop — PAUSED  -{} ", fmt_lag(app.history.time_behind())),
-            Style::default()
-                .fg(app.theme.cursor_fg)
-                .bg(app.theme.cursor)
-                .add_modifier(Modifier::BOLD),
+            app.theme.paused_style(),
         )
     };
 
@@ -168,7 +153,7 @@ fn draw_cores(f: &mut Frame, area: Rect, s: &Sample, theme: &Theme) {
         .flat_map(|&pct| {
             let idx = ((pct / 100.0 * 7.0).round() as usize).min(7);
             [
-                Span::styled(BARS[idx].to_string(), Style::default().fg(theme.heat(pct))),
+                Span::styled(BARS[idx].to_string(), theme.heat_style(pct)),
                 Span::raw(" "),
             ]
         })
@@ -231,7 +216,7 @@ fn draw_timeline(f: &mut Frame, area: Rect, app: &App) {
         let span = fmt_lag(Duration::from_secs(window.len() as u64));
         lines.push(Line::from(Span::styled(
             format!("cpu · mem — {span} shown, {zoom}s/slot — ←/→ scrub, +/- zoom"),
-            Style::default().add_modifier(Modifier::DIM),
+            app.theme.dim_style(),
         )));
     }
 
@@ -262,10 +247,7 @@ fn glyph_row(
             // Colour by the peak of the pair: a cell holding a spike and an
             // idle sample should read as hot, not as lukewarm.
             let peak = pcts.iter().copied().fold(0.0_f32, f32::max);
-            Span::styled(
-                set.glyph(left, right).to_string(),
-                Style::default().fg(theme.heat(peak)),
-            )
+            Span::styled(set.glyph(left, right).to_string(), theme.heat_style(peak))
         })
         .collect::<Vec<_>>();
     Line::from(spans)
@@ -286,7 +268,7 @@ fn cursor_row(
     if app.history.is_live() || n_values == 0 {
         return Line::from(Span::styled(
             format!("{:<width$}now", "past", width = inner_w.saturating_sub(3)),
-            Style::default().add_modifier(Modifier::DIM),
+            app.theme.dim_style(),
         ));
     }
 
@@ -302,9 +284,7 @@ fn cursor_row(
     }
     Line::from(Span::styled(
         row.into_iter().collect::<String>(),
-        Style::default()
-            .fg(app.theme.cursor)
-            .add_modifier(Modifier::BOLD),
+        app.theme.cursor_style(),
     ))
 }
 
@@ -325,9 +305,7 @@ fn draw_procs(f: &mut Frame, area: Rect, app: &App) {
             let p = r.proc;
             let mut style = Style::default();
             if i == app.selected {
-                style = style
-                    .bg(app.theme.selection_bg)
-                    .add_modifier(Modifier::BOLD);
+                style = app.theme.selection_style();
             } else if r.context_only {
                 // Present only as an ancestor of a filter match: visible for
                 // parentage, but clearly not itself a hit.
@@ -336,15 +314,14 @@ fn draw_procs(f: &mut Frame, area: Rect, app: &App) {
             let mut cells = vec![
                 Cell::from(p.pid.to_string()),
                 Cell::from(p.user.to_string()),
-                Cell::from(format!("{:.1}", p.cpu))
-                    .style(Style::default().fg(app.theme.heat(p.cpu))),
+                Cell::from(format!("{:.1}", p.cpu)).style(app.theme.heat_style(p.cpu)),
                 Cell::from(fmt_bytes(p.rss)),
                 Cell::from(p.state.to_string()),
                 Cell::from(p.threads.to_string()),
             ];
             if app.show_io {
-                cells.push(io_cell(collected, p.io, false));
-                cells.push(io_cell(collected, p.io, true));
+                cells.push(io_cell(collected, p.io, false, &app.theme));
+                cells.push(io_cell(collected, p.io, true, &app.theme));
             }
             cells.push(Cell::from(format!("{}{}", r.prefix, p.name)));
             Row::new(cells).style(style)
@@ -393,8 +370,8 @@ fn draw_procs(f: &mut Frame, area: Rect, app: &App) {
 /// Three distinct states, none of them a zero: `·` for history recorded before
 /// the column was switched on, `—` for a process this user may not read, and a
 /// rate otherwise.
-fn io_cell(collected: bool, io: Option<IoRates>, write: bool) -> Cell<'static> {
-    let dim = Style::default().add_modifier(Modifier::DIM);
+fn io_cell(collected: bool, io: Option<IoRates>, write: bool, theme: &Theme) -> Cell<'static> {
+    let dim = theme.dim_style();
     match (collected, io) {
         (false, _) => Cell::from("·").style(dim),
         (true, None) => Cell::from("—").style(dim),
@@ -434,18 +411,15 @@ fn io_status(app: &App, collected: bool, rows: &[crate::tree::TreeRow]) -> Strin
 fn draw_help(f: &mut Frame, area: Rect, app: &App) {
     let line = if app.editing_filter {
         Line::from(vec![
-            Span::styled("filter: ", Style::default().fg(app.theme.cursor)),
+            Span::styled("filter: ", app.theme.cursor_style()),
             Span::raw(&app.filter),
-            Span::styled("█", Style::default().fg(app.theme.cursor)),
-            Span::styled(
-                "   (Enter/Esc to finish)",
-                Style::default().add_modifier(Modifier::DIM),
-            ),
+            Span::styled("█", app.theme.cursor_style()),
+            Span::styled("   (Enter/Esc to finish)", app.theme.dim_style()),
         ])
     } else {
         Line::from(Span::styled(
             "q quit · ←/→ scrub · +/- zoom · Space live · ↑/↓ select · s sort · t tree · i io · / filter",
-            Style::default().add_modifier(Modifier::DIM),
+            app.theme.dim_style(),
         ))
     };
     f.render_widget(Paragraph::new(line), area);
