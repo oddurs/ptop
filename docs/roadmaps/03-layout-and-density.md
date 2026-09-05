@@ -55,7 +55,7 @@ gracefully on a many-core machine (test at 128 cores). Header stays one line.
 
 ---
 
-## L3 — Give reclaimed rows to the timeline  ·  `S`
+## L3 — Give reclaimed rows to the timeline  ·  `S`  ·  **DONE**
 
 **What.** Timeline height becomes proportional rather than `Length(10)`, taking
 the space `L1` and `L2` free up, with a floor and a ceiling.
@@ -67,6 +67,13 @@ leaving blanks.
 
 **Acceptance.** Timeline grows on tall terminals and never starves the process
 table below a usable minimum. Existing small-terminal tests still pass.
+
+**Corrected during implementation.** "Proportional" alone is a regression. A
+plain proportion gave an 80×24 terminal five rows where nine were fixed before
+— a quarter of the CPU resolution, on the commonest terminal size, from a change
+justified by more resolution. Growing a panel must never shrink it, so the old
+fixed height is the floor wherever it fits and the proportion only applies above
+it.
 
 **Depends on.** `L1`, `L2`
 

@@ -24,23 +24,59 @@ const BARS: [char; 8] = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█']
 // separates without doing that. L2 then folded the cores section in here,
 // trading its divider and its data row for one header line.
 pub const HEADER_H: u16 = 3; // title, figures, cores
-pub const TIMELINE_H: u16 = 9; // divider, graphs, cursor, legend
-
-/// Rows occupied by the timeline panel, borders included.
+/// The height the timeline had when it was fixed.
 ///
-/// Test-only: it exists so a test can locate the panel from the same constants
-/// the renderer lays out with, rather than copying them into a comment.
+/// It is the floor, not a minimum for legibility: growing a panel must never
+/// shrink it. A proportional height alone gave an 80x24 terminal five rows
+/// where nine were fixed before — a quarter of the CPU resolution, on the most
+/// common terminal size, from a change justified by *more* resolution.
+pub const TIMELINE_MIN_H: u16 = 9;
+/// Beyond this, rows stop buying resolution and start starving the table.
+pub const TIMELINE_MAX_H: u16 = 16;
+/// Rows reserved for the process table when deciding the timeline's height.
+///
+/// A reservation, not a layout constraint: the table is laid out with whatever
+/// remains, so this number and the layout cannot drift apart.
+pub const PROCS_RESERVE_H: u16 = 6;
+/// The table always keeps at least this much, however cramped the terminal.
+const PROCS_FLOOR_H: u16 = 2;
+
+/// Timeline height for a terminal of `total` rows.
+///
+/// Proportional above the floor, because rows are resolution here: each braille
+/// row carries four levels, so the eleven-row panel a 38-row terminal gives has
+/// twenty distinct CPU heights against the twelve of the old fixed nine.
+///
+/// Never below the height it used to have, and never so tall the process table
+/// cannot be read.
+pub fn timeline_height(total: u16) -> u16 {
+    let spare = total.saturating_sub(HEADER_H + PROCS_RESERVE_H + 1);
+    let want = (spare * 2 / 5).clamp(TIMELINE_MIN_H, TIMELINE_MAX_H);
+    // On a terminal too small for the floor, take what is left over — but never
+    // everything, or the table disappears.
+    want.min(total.saturating_sub(HEADER_H + 1 + PROCS_FLOOR_H).max(1))
+}
+
+/// Rows occupied by the timeline panel.
+///
+/// Test-only: it exists so a test can locate the panel from the same function
+/// the renderer lays out with. Accurate because the timeline is a `Length` and
+/// the table takes what remains — with a `Min` on the table, ratatui would
+/// outrank the timeline and this would report a panel that is not there.
 #[cfg(test)]
-pub fn timeline_rows_range() -> std::ops::Range<u16> {
+pub fn timeline_rows_range(total_height: u16) -> std::ops::Range<u16> {
     let top = HEADER_H;
-    top..top + TIMELINE_H
+    top..top + timeline_height(total_height)
 }
 
 pub fn draw(f: &mut Frame, app: &App) {
     let chunks = Layout::vertical([
         Constraint::Length(HEADER_H),
-        Constraint::Length(TIMELINE_H),
-        Constraint::Min(5),    // processes
+        Constraint::Length(timeline_height(f.area().height)),
+        // Whatever remains. `timeline_height` has already reserved the table's
+        // share, and a `Min` here would outrank the timeline's `Length` and
+        // silently shrink it below the height that function reports.
+        Constraint::Min(1),
         Constraint::Length(1), // help
     ])
     .split(f.area());
@@ -297,7 +333,15 @@ fn draw_timeline(f: &mut Frame, area: Rect, app: &App) {
     // four columns of axis is a poor trade against four columns of history
     // when there is little room, and the threshold rules still anchor the
     // graph without it.
-    let gutter = if inner_w >= MIN_WIDTH_FOR_GUTTER {
+    // Reserve the gutter only when some section can actually fill it. A section
+    // shorter than `MIN_ROWS_FOR_AXIS` carries no anchors and no label, so the
+    // columns would be blank while the graph lost that much history.
+    let graph_rows_probe = inner_h.saturating_sub(2).max(1);
+    let cpu_probe = (graph_rows_probe * 3 / 5).max(1);
+    let mem_probe = graph_rows_probe.saturating_sub(cpu_probe);
+    let gutter = if inner_w >= MIN_WIDTH_FOR_GUTTER
+        && (cpu_probe >= MIN_ROWS_FOR_AXIS || mem_probe >= MIN_ROWS_FOR_AXIS)
+    {
         GUTTER_W
     } else {
         0
