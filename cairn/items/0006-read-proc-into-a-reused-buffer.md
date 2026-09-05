@@ -2,7 +2,7 @@
 id: 6
 title: Read /proc into a reused buffer
 type: feature
-status: backlog
+status: done
 milestone: v0.2
 created: 2026-09-05
 updated: 2026-09-05
