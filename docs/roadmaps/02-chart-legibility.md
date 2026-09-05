@@ -82,7 +82,7 @@ suppresses itself when live. Shows both CPU and MEM at that instant.
 
 ---
 
-## G5 — Colour the timeline by series, not magnitude  ·  `M`
+## G5 — Colour the timeline by series, not magnitude  ·  `M`  ·  **DONE**
 
 **What.** CPU and MEM each take a categorical series token. Remove the
 magnitude-driven `heat()` call from `draw_timeline`.

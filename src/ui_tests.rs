@@ -1265,3 +1265,94 @@ fn the_readout_flips_side_rather_than_being_clipped() {
         "readout should sit left of a right-edge cursor: {cursor_row:?}"
     );
 }
+
+/// The distinct foreground colours used by the graph rows of the timeline,
+/// excluding chrome (borders, gutter, threshold rules).
+fn graph_colours(app: &App, w: u16, h: u16) -> std::collections::HashSet<String> {
+    let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
+    term.draw(|f| ui::draw_timeline_for_test(f, f.area(), app))
+        .unwrap();
+    let buf = term.backend().buffer();
+    let graph_rows = (h as usize - 2).saturating_sub(2).max(1);
+    let mut out = std::collections::HashSet::new();
+    for row in 0..graph_rows {
+        for x in 5..w - 1 {
+            let c = &buf[(x, 1 + row as u16)];
+            if c.fg != app.theme.chrome && c.symbol() != " " {
+                out.insert(format!("{:?}", c.fg));
+            }
+        }
+    }
+    out
+}
+
+#[test]
+fn timeline_colour_carries_identity_not_magnitude() {
+    // Bar height already encodes the value. Colouring by the same number is
+    // double-encoding: it spends the one free channel on information the chart
+    // is already showing. An idle machine and a dying one must therefore draw
+    // in the same hues, differing only in bar height.
+    let build = |cpu: f32| {
+        let mut app = App::new(600);
+        for i in (0..60).rev() {
+            let mut s = sample_at(cpu, i);
+            s.mem.used = ((cpu / 100.0 * 16.0) as u64) << 30;
+            app.push(s);
+        }
+        app.theme = Theme::new(Palette::Safe, Tier::TrueColor);
+        app
+    };
+    let idle = graph_colours(&build(5.0), 100, 14);
+    let busy = graph_colours(&build(95.0), 100, 14);
+    assert_eq!(
+        idle, busy,
+        "timeline recolours with magnitude; colour should mean which series"
+    );
+    assert!(
+        !idle.is_empty(),
+        "no graph colours found — test proves nothing"
+    );
+}
+
+#[test]
+fn the_two_series_are_told_apart_by_colour() {
+    let mut app = App::new(600);
+    for i in (0..60).rev() {
+        app.push(sample_at(50.0, i));
+    }
+    app.theme = Theme::new(Palette::Safe, Tier::TrueColor);
+    let seen = graph_colours(&app, 100, 14);
+    assert!(
+        seen.len() >= 2,
+        "cpu and mem render in the same colour: {seen:?}"
+    );
+    assert!(seen.contains(&format!("{:?}", app.theme.series_cpu)));
+    assert!(seen.contains(&format!("{:?}", app.theme.series_mem)));
+}
+
+#[test]
+fn status_colour_is_kept_where_it_answers_is_this_bad() {
+    // The header figures and the core meters are where a reader asks "is this
+    // bad right now", not "what shape was this" — so heat earns its place
+    // there and only there.
+    let styles_at = |cpu: f32| {
+        let mut app = App::new(60);
+        app.push(sample(cpu));
+        app.theme = Theme::new(Palette::Safe, Tier::TrueColor);
+        let mut term = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        term.draw(|f| ui::draw(f, &app)).unwrap();
+        let buf = term.backend().buffer();
+        // Header panel is rows 0..2, cores panel rows 3..5, so the header
+        // figures are on row 1 and the core meter glyphs on row 4.
+        let row = |y: u16| {
+            (0..100u16)
+                .map(|x| format!("{:?}", buf[(x, y)].fg))
+                .collect::<String>()
+        };
+        (row(1), row(4))
+    };
+    let (h_idle, c_idle) = styles_at(5.0);
+    let (h_busy, c_busy) = styles_at(95.0);
+    assert_ne!(h_idle, h_busy, "header figures lost their status colour");
+    assert_ne!(c_idle, c_busy, "core meters lost their status colour");
+}

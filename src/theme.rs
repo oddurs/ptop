@@ -86,6 +86,23 @@ impl Tier {
 
 /// Which set of hues to use. Orthogonal to [`Tier`], which is how many colours
 /// the terminal can render.
+///
+/// # Both palettes share their identity hues
+///
+/// "Green means good" is a convention about **status**. It says nothing about
+/// what colour a CPU line should be, so there is no classic answer for the
+/// series tokens, and inventing one would mean validating a second pair of hues
+/// for no benefit.
+///
+/// Measured against the classic status hues under Machado 2009, the shared
+/// indigo/mauve pair separates by at least ΔE 10.0 at true colour and 12.0 on
+/// the 256 cube, against a target of 8. Enforced by
+/// `identity_hues_clear_both_status_palettes`.
+///
+/// This matters because G5 moved the timeline onto these tokens. Before that
+/// they were placeholders equal to `ok`, so shipping G5 without separating them
+/// drew CPU and MEM in one hue — the hue that also means "good", so a machine
+/// at 95% drew its timeline in green.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Palette {
     /// Cyan / amber / red. The default.
@@ -271,8 +288,9 @@ impl Theme {
             ok: Color::Green,
             warn: Color::Yellow,
             critical: Color::Red,
-            series_cpu: Color::Green,
-            series_mem: Color::Green,
+            // Shared with the safe palette; see [`Palette`].
+            series_cpu: Color::LightBlue,
+            series_mem: Color::Magenta,
             chrome: Color::DarkGray,
             text: Color::Reset,
             // Gray, not DarkGray: chrome takes DarkGray, and collapsing both
@@ -295,8 +313,9 @@ impl Theme {
             ok: Color::Indexed(114),
             warn: Color::Indexed(179),
             critical: Color::Indexed(167),
-            series_cpu: Color::Indexed(114),
-            series_mem: Color::Indexed(114),
+            // Shared with the safe palette; see [`Palette`].
+            series_cpu: Color::Indexed(67),
+            series_mem: Color::Indexed(135),
             chrome: Color::Indexed(239),
             text: Color::Indexed(252),
             text_dim: Color::Indexed(244),
@@ -316,12 +335,9 @@ impl Theme {
             ok: Color::Rgb(0x77, 0xca, 0x9b),
             warn: Color::Rgb(0xcb, 0xc0, 0x6c),
             critical: Color::Rgb(0xdc, 0x4c, 0x4c),
-            // Placeholders: the timeline still colours by magnitude, so these
-            // are deliberately not yet distinct hues. G5 moves the timeline
-            // onto them and C3 gives them separated values — cyan and violet,
-            // which measure ΔE 18.3 apart and clear every status token.
-            series_cpu: Color::Rgb(0x77, 0xca, 0x9b),
-            series_mem: Color::Rgb(0x77, 0xca, 0x9b),
+            // Shared with the safe palette; see [`Palette`].
+            series_cpu: Color::Rgb(0x7a, 0x7a, 0xe6),
+            series_mem: Color::Rgb(0xb4, 0x8e, 0xad),
             chrome: Color::Rgb(0x50, 0x50, 0x50),
             text: Color::Rgb(0xcc, 0xcc, 0xcc),
             text_dim: Color::Rgb(0x80, 0x80, 0x80),
@@ -409,6 +425,22 @@ impl Theme {
         Style::default()
             .add_modifier(Modifier::BOLD)
             .add_modifier(Modifier::REVERSED)
+    }
+
+    /// One series of a graph, by identity rather than by value.
+    ///
+    /// Bar height already encodes magnitude; colouring by the same number is
+    /// double-encoding, and it spends the one free channel on information the
+    /// chart is already showing. Identity is the job height cannot do.
+    ///
+    /// Without colour the series are told apart by position and by the gutter
+    /// labels, which is why those had to land first.
+    pub fn series_style(&self, series: Color) -> Style {
+        if self.tier.has_color() {
+            Style::default().fg(series)
+        } else {
+            Style::default()
+        }
     }
 
     /// Panel borders and rules.
@@ -839,16 +871,63 @@ mod tests {
     }
 
     #[test]
-    fn safe_palette_never_reuses_a_status_hue_for_identity() {
+    fn no_palette_reuses_a_status_hue_for_identity() {
         // Status means a state; identity means which thing this is. A series
         // that borrows a status hue destroys the status hue's meaning.
-        for tier in [Tier::Ansi16, Tier::Ansi256, Tier::TrueColor] {
-            let t = Theme::new(Palette::Safe, tier);
+        //
+        // Looped over both palettes deliberately: testing only Safe let G5 ship
+        // a classic timeline drawing CPU and MEM in one hue — the `ok` hue, so
+        // a machine at 95% drew its timeline in green.
+        for (palette, tier) in [Palette::Safe, Palette::Classic]
+            .into_iter()
+            .flat_map(|p| [Tier::Ansi16, Tier::Ansi256, Tier::TrueColor].map(|t| (p, t)))
+        {
+            let t = Theme::new(palette, tier);
             for status in [t.ok, t.warn, t.critical] {
-                assert_ne!(t.series_cpu, status, "{tier:?}: cpu borrows a status hue");
-                assert_ne!(t.series_mem, status, "{tier:?}: mem borrows a status hue");
+                assert_ne!(
+                    t.series_cpu, status,
+                    "{palette:?}/{tier:?}: cpu borrows a status hue"
+                );
+                assert_ne!(
+                    t.series_mem, status,
+                    "{palette:?}/{tier:?}: mem borrows a status hue"
+                );
             }
-            assert_ne!(t.series_cpu, t.series_mem, "{tier:?}: series are identical");
+            assert_ne!(
+                t.series_cpu, t.series_mem,
+                "{palette:?}/{tier:?}: series identical"
+            );
+        }
+    }
+
+    #[test]
+    fn identity_hues_clear_both_status_palettes() {
+        // The series hues are shared, so they must separate from *both* status
+        // sets — the classic one included, even though its own status hues are
+        // knowingly below target.
+        use crate::cvd::{CVD_TARGET, to_rgb, worst_cvd};
+        for tier in [Tier::Ansi256, Tier::TrueColor] {
+            let series = Theme::new(Palette::Safe, tier);
+            let (cpu, mem) = (
+                to_rgb(series.series_cpu).unwrap(),
+                to_rgb(series.series_mem).unwrap(),
+            );
+            assert!(worst_cvd(cpu, mem) >= CVD_TARGET);
+            for palette in [Palette::Safe, Palette::Classic] {
+                let th = Theme::new(palette, tier);
+                assert_eq!(th.series_cpu, series.series_cpu, "identity hues diverged");
+                assert_eq!(th.series_mem, series.series_mem, "identity hues diverged");
+                for (name, s) in [("ok", th.ok), ("warn", th.warn), ("crit", th.critical)] {
+                    let s = to_rgb(s).unwrap();
+                    for (sn, sv) in [("cpu", cpu), ("mem", mem)] {
+                        let d = worst_cvd(sv, s);
+                        assert!(
+                            d >= CVD_TARGET,
+                            "{palette:?}/{tier:?}: {sn} vs {name} is dE {d:.1}"
+                        );
+                    }
+                }
+            }
         }
     }
 
