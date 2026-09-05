@@ -1218,14 +1218,12 @@ fn the_readout_never_pushes_the_marker_off_its_column() {
 }
 
 #[test]
-fn a_cursor_older_than_the_window_states_nothing_it_cannot_show() {
-    // Home, on a buffer longer than the panel is wide. The marker pins to the
-    // left edge because there is nowhere truthful to put it; printing the
-    // off-screen sample's figures beside it would contradict the column it
-    // points at.
+fn scrubbing_past_the_left_edge_scrolls_the_window() {
+    // G4 made the off-window case honest — an explicit marker and no figures.
+    // G7 removes the case: Home now scrolls the graph to the oldest samples,
+    // so the readout can state them because they are on screen.
     let mut app = App::new(600);
     for i in (0..500).rev() {
-        // Oldest region distinctly different, so a leak is unmistakable.
         app.push(sample_at(if i > 400 { 11.0 } else { 88.0 }, i as u64));
     }
     app.theme = Theme::new(Palette::Safe, Tier::TrueColor);
@@ -1233,13 +1231,63 @@ fn a_cursor_older_than_the_window_states_nothing_it_cannot_show() {
 
     let text = timeline_rows(&app, 100, 12).join("\n");
     assert!(
-        !text.contains("CPU 11.0%"),
-        "readout claims an off-screen sample:\n{text}"
+        text.contains("CPU 11.0%"),
+        "window did not follow the cursor to the oldest sample:\n{text}"
     );
     assert!(
-        text.contains('◀'),
-        "cursor is off-window but nothing says so:\n{text}"
+        !text.contains('◀'),
+        "off-window marker shown when the window can reach the cursor"
     );
+}
+
+#[test]
+fn the_live_view_does_not_shuffle_while_the_cursor_is_inside_it() {
+    // Scrolling on every keypress would make the graph slide sideways under
+    // the reader. The window only moves once the cursor would leave it.
+    let mut app = App::new(600);
+    for i in (0..500).rev() {
+        app.push(sample_at((i as f32 * 1.7) % 100.0, i as u64));
+    }
+    app.theme = Theme::new(Palette::Safe, Tier::TrueColor);
+
+    let graph = |a: &App| timeline_rows(a, 100, 12)[1..5].join("\n");
+    let live = graph(&app);
+    // A few steps back: still inside the live-anchored window.
+    app.history.scrub(-3);
+    assert_eq!(
+        graph(&app),
+        live,
+        "graph moved while the cursor was still on it"
+    );
+
+    // Far enough back to leave it: now it must follow.
+    app.history.scrub(-400);
+    assert_ne!(graph(&app), live, "graph failed to follow the cursor");
+}
+
+#[test]
+fn zoom_still_works_at_any_scroll_position() {
+    let mut app = App::new(600);
+    for i in (0..500).rev() {
+        app.push(sample_at((i as f32 * 1.7) % 100.0, i as u64));
+    }
+    app.theme = Theme::new(Palette::Safe, Tier::TrueColor);
+    app.history.goto_oldest();
+
+    let mut seen = std::collections::HashSet::new();
+    for _ in 0..crate::app::ZOOM_LEVELS.len() {
+        let rows = timeline_rows(&app, 100, 12);
+        assert_eq!(rows.len(), 12);
+        // The cursor must remain visible at every zoom level.
+        assert!(
+            rows.iter().any(|r| r.contains('▌') || r.contains('▐')),
+            "cursor lost at zoom {}",
+            app.zoom()
+        );
+        seen.insert(rows[1].clone());
+        app.zoom_out();
+    }
+    assert!(seen.len() > 1, "zoom had no effect while scrolled back");
 }
 
 #[test]
@@ -1516,4 +1564,73 @@ fn the_stated_scale_matches_the_colouring_it_describes() {
     let row: String = (0..100u16).map(|x| buf[(x, 0)].symbol()).collect();
     assert!(row.contains(&format!("warn {:.0}", Theme::WARN_PCT)));
     assert!(row.contains(&format!("crit {:.0}", Theme::CRITICAL_PCT)));
+}
+
+#[test]
+fn the_graph_does_not_slide_on_a_single_keypress_while_scrolled_back() {
+    // The bug this guards: deriving the window directly from the cursor drags
+    // it one sample sideways on every keypress, so the graph slides under the
+    // reader — and at zoom > 1 the buckets re-form and bar heights change too.
+    // Paging keeps the window still until the cursor crosses a page boundary.
+    let mut app = App::new(600);
+    for i in (0..500).rev() {
+        app.push(sample_at((i as f32 * 1.7) % 100.0, i as u64));
+    }
+    app.theme = Theme::new(Palette::Safe, Tier::TrueColor);
+    app.history.goto_oldest();
+
+    let graph = |a: &App| timeline_rows(a, 100, 12)[1..5].join("\n");
+    let before = graph(&app);
+    app.history.scrub(1);
+    assert_eq!(
+        graph(&app),
+        before,
+        "graph slid sideways on a keypress that should only move the marker"
+    );
+}
+
+#[test]
+fn the_cursor_is_not_glued_to_the_left_edge_while_scrolled_back() {
+    // Pinning the cursor to column 0 means never seeing anything older than
+    // where you are — the very behaviour G7 exists to remove.
+    let mut app = App::new(600);
+    for i in (0..500).rev() {
+        app.push(sample_at((i as f32 * 1.7) % 100.0, i as u64));
+    }
+    app.theme = Theme::new(Palette::Safe, Tier::TrueColor);
+
+    // Somewhere deep in the buffer, but not at its very start.
+    app.history.goto_oldest();
+    app.history.scrub(60);
+
+    let x = cursor_column(&app, 100, 12).expect("cursor should be drawn");
+    assert!(
+        x > 6,
+        "cursor is pinned near the left edge at column {x}; history older than \
+         the cursor is unreachable"
+    );
+}
+
+#[test]
+fn every_scrub_position_keeps_the_cursor_inside_the_window() {
+    // Paging must contain the cursor at every position and zoom, or the
+    // off-window fallback becomes reachable again.
+    for zoom_steps in 0..crate::app::ZOOM_LEVELS.len() {
+        let mut app = App::new(600);
+        for i in (0..500).rev() {
+            app.push(sample_at(50.0, i as u64));
+        }
+        app.theme = Theme::new(Palette::Safe, Tier::TrueColor);
+        for _ in 0..zoom_steps {
+            app.zoom_out();
+        }
+        app.history.goto_oldest();
+        for step in 0..40 {
+            assert!(
+                cursor_column(&app, 100, 12).is_some(),
+                "zoom step {zoom_steps}, scrub {step}: cursor left the window"
+            );
+            app.history.scrub(11);
+        }
+    }
 }

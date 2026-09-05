@@ -269,7 +269,16 @@ fn draw_timeline(f: &mut Frame, area: Rect, app: &App) {
     let samples: Vec<&Sample> = app.history.iter().collect();
     let zoom = app::effective_zoom(app.zoom(), samples.len(), slots);
     let shown = (slots * zoom).min(samples.len());
-    let window = &samples[samples.len() - shown..];
+    // Text-editor scrolling. The window stays anchored to the live edge while
+    // the cursor is inside it, and follows only once the cursor would leave —
+    // so the live view never shuffles, and scrubbing never takes you somewhere
+    // you cannot see.
+    //
+    // Stateless on purpose: the window position is derived from the cursor each
+    // frame rather than stored, so there is no scroll offset to keep in sync
+    // with a buffer that is being written to at the same time.
+    let window_start = window_start(&app.history, shown);
+    let window = &samples[window_start..window_start + shown];
 
     let cpu: Vec<f32> = window.iter().map(|s| s.cpu_total).collect();
     let mem: Vec<f32> = window.iter().map(|s| s.mem.used_pct()).collect();
@@ -322,12 +331,15 @@ fn draw_timeline(f: &mut Frame, area: Rect, app: &App) {
 
     lines.push(cursor_row(
         app,
-        window.len(),
-        zoom,
-        slots,
-        spc,
-        graph_w,
-        gutter,
+        Window {
+            len: window.len(),
+            start: window_start,
+            zoom,
+            slots,
+            spc,
+            graph_w,
+            gutter,
+        },
     ));
 
     if lines.len() < inner_h {
@@ -474,19 +486,62 @@ fn axis_label(
     )]
 }
 
+/// Index of the first sample drawn.
+///
+/// The buffer is divided into pages of `shown` samples counted back from the
+/// live edge, and the window shows whichever page the cursor is on. Page 0 is
+/// the live window, so the live view is unchanged.
+///
+/// Paging rather than following. A window derived directly from the cursor
+/// drags one sample sideways on every keypress — the graph slides under the
+/// reader, and at `zoom > 1` the buckets re-form so bar heights change too. It
+/// also pins the cursor to column 0, which means never seeing anything *older*
+/// than where you are: exactly the behaviour G7 exists to remove, reintroduced.
+///
+/// Paging gives that hysteresis without storing a scroll offset. `ui::draw`
+/// takes `&App`, and the window size depends on panel width and zoom — both
+/// render-time facts — so a remembered offset would need interior mutability
+/// or a mutable draw. Deriving the page from the cursor needs neither.
+///
+/// `peak_slots` remains right-aligned within whatever slice it is given; only
+/// the choice of slice changed. The right edge is therefore "newest in the
+/// window" rather than "now", which is why the axis claims `now` only while
+/// live and shows the cursor's own figures otherwise.
+fn window_start(history: &history::History, shown: usize) -> usize {
+    let len = history.len();
+    let last_page = len.saturating_sub(shown);
+    if history.is_live() || shown == 0 {
+        return last_page;
+    }
+    // Pages counted back from the live edge, so page 0 is the live window.
+    let from_newest = len.saturating_sub(1) - history.cursor_index();
+    let page = from_newest / shown;
+    last_page.saturating_sub(page * shown)
+}
+
+/// Where the timeline's window sits and how it maps to columns. Bundled for
+/// the same reason `GraphRow` is: the parameter list had outgrown readability.
+struct Window {
+    /// Samples drawn.
+    len: usize,
+    /// Index of the first sample drawn.
+    start: usize,
+    zoom: usize,
+    slots: usize,
+    /// Samples per character cell.
+    spc: usize,
+    /// Columns available to the graph, excluding the gutter.
+    graph_w: usize,
+    gutter: usize,
+}
+
 /// The row under the graph marking where the scrub cursor sits.
 ///
 /// When a cell holds two samples the marker picks the correct half, so packing
 /// never costs cursor precision.
-fn cursor_row(
-    app: &App,
-    n_values: usize,
-    zoom: usize,
-    slots: usize,
-    spc: usize,
-    graph_w: usize,
-    gutter: usize,
-) -> Line<'static> {
+fn cursor_row(app: &App, w: Window) -> Line<'static> {
+    let (n_values, window_start, zoom, slots, spc, graph_w, gutter) =
+        (w.len, w.start, w.zoom, w.slots, w.spc, w.graph_w, w.gutter);
     let pad = " ".repeat(gutter);
     if app.history.is_live() || n_values == 0 {
         return Line::from(Span::styled(
@@ -501,13 +556,15 @@ fn cursor_row(
 
     // The cursor is an index into the whole buffer; the graph shows a window of
     // the newest `n_values`, so rebase before locating it.
-    let dropped = app.history.len().saturating_sub(n_values);
-
-    // The cursor can sit further back than the window reaches — press Home on a
-    // buffer longer than the panel is wide. The marker then pins to the left
-    // edge, and a readout beside it would state a figure for a sample that is
-    // not on screen, contradicting the very column it points at. Say so.
-    if app.history.cursor_index() < dropped {
+    // Paging always contains the cursor, so this is unreachable. Asserted in
+    // debug so a windowing mistake is loud in tests, but kept as a fallback in
+    // release: a wrong marker is a bug, a panicking monitor is worse.
+    debug_assert!(
+        app.history.cursor_index() >= window_start,
+        "cursor {} precedes window start {window_start}",
+        app.history.cursor_index()
+    );
+    if app.history.cursor_index() < window_start {
         let mut row = vec![' '; graph_w];
         if let Some(c) = row.first_mut() {
             *c = '◀';
@@ -521,7 +578,7 @@ fn cursor_row(
         ]);
     }
 
-    let idx = app.history.cursor_index() - dropped;
+    let idx = app.history.cursor_index() - window_start;
     let slot = history::slot_of_index(idx, n_values, zoom, slots);
 
     let cell = (slot / spc).min(graph_w.saturating_sub(1));

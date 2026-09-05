@@ -106,7 +106,7 @@ threshold state.
 
 ---
 
-## G7 — The window should follow the cursor  ·  `M`
+## G7 — The window should follow the cursor  ·  `M`  ·  **DONE**
 
 **What.** When the scrub cursor moves to a sample outside the drawn window,
 scroll the window to include it instead of pinning the marker to the left edge.
@@ -133,7 +133,13 @@ not a patch.
 **Acceptance.** Scrubbing past the left edge scrolls the window. The newest
 sample still pins right whenever the cursor is inside the live window, so the
 live view does not shuffle. Zoom continues to work at any scroll position.
-`◀` remains for the case where the cursor is genuinely outside the buffer.
+
+**Corrected during implementation.** This entry originally said "`◀` remains
+for the case where the cursor is genuinely outside the buffer". There is no
+such case: `History::push` slides a pinned cursor rather than letting it fall
+off the end, so `cursor_index` is always inside the buffer, and the window
+always contains it. The branch is a `debug_assert!` plus a release fallback —
+a wrong marker is a bug, a panicking monitor is worse.
 
 **Touches.** `src/history.rs`, `src/ui.rs`
 

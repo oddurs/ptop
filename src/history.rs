@@ -115,8 +115,10 @@ impl History {
 
 /// Aggregate the newest values into exactly `slots` display slots.
 ///
-/// Right-aligned on purpose: the newest value always lands in the last slot, so
-/// slot boundaries do not shift under the viewer every time a sample arrives.
+/// Right-aligned on purpose: the newest value in `values` always lands in the
+/// last slot, so slot boundaries do not shift under the viewer every time a
+/// sample arrives. Note "newest in `values`", not "newest overall" — the caller
+/// chooses the slice, and since G7 it scrolls that slice to follow the cursor.
 /// Leading slots with nothing to show are `None` rather than zero, so an
 /// unfilled buffer reads as empty instead of as an idle machine.
 ///
