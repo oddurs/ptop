@@ -1,0 +1,237 @@
+//! ptop — a system monitor you can rewind.
+//!
+//! Copyright (C) 2026  ptop contributors
+//!
+//! This program is free software: you can redistribute it and/or modify it
+//! under the terms of the GNU General Public License as published by the Free
+//! Software Foundation, either version 3 of the License, or (at your option)
+//! any later version. See the LICENSE file for details.
+
+mod app;
+mod collect;
+mod history;
+mod sample;
+mod ui;
+
+#[cfg(test)]
+mod ui_tests;
+
+use app::{App, Sort};
+use collect::{Collector, Platform};
+use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
+use std::io;
+use std::time::{Duration, Instant};
+
+const USAGE: &str = "\
+ptop — a system monitor you can rewind
+
+USAGE:
+    ptop            interactive mode
+    ptop --once     print one plain-text sample and exit
+
+OPTIONS:
+    -h, --help      show this help
+    -V, --version   show version
+
+KEYS:
+    q               quit
+    Left/Right      scrub through history (Shift for 10 at a time)
+    Space           pause on the current sample, or resume live
+    Home/End        jump to oldest / live
+    Up/Down         select a process
+    s               cycle sort column
+    /               filter by name or pid
+";
+
+/// Wall-clock seconds between samples.
+const SAMPLE_INTERVAL: Duration = Duration::from_secs(1);
+/// Samples retained, so ten minutes of scrollback at one per second.
+const HISTORY_LEN: usize = 600;
+
+fn main() -> io::Result<()> {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let mut collector = Platform::new()?;
+
+    match args.first().map(String::as_str) {
+        Some("--once") => return once(&mut collector),
+        Some("--help" | "-h") => {
+            println!("{USAGE}");
+            return Ok(());
+        }
+        Some("--version" | "-V") => {
+            println!("ptop {}", env!("CARGO_PKG_VERSION"));
+            return Ok(());
+        }
+        Some(other) => {
+            eprintln!("ptop: unrecognised option '{other}'\n\n{USAGE}");
+            std::process::exit(2);
+        }
+        None => {}
+    }
+
+    let mut app = App::new(HISTORY_LEN);
+
+    // Collect once before drawing so the first frame has real numbers. CPU
+    // still reads zero — there is no previous counter to diff against yet.
+    app.push(collector.sample()?);
+
+    let mut terminal = ratatui::init();
+    let result = run(&mut terminal, &mut app, &mut collector);
+    ratatui::restore();
+    result
+}
+
+/// Print one sample as plain text and exit.
+///
+/// Two samples are taken, one interval apart: CPU figures are deltas between
+/// reads, so a single sample could only ever report zero.
+fn once(collector: &mut impl Collector) -> io::Result<()> {
+    collector.sample()?;
+    std::thread::sleep(SAMPLE_INTERVAL);
+    let s = collector.sample()?;
+
+    println!("cpu    {:.1}%  ({} cores)", s.cpu_total, s.cpu_per_core.len());
+    println!(
+        "mem    {:.1}%  {} / {} used, {} available",
+        s.mem.used_pct(),
+        human(s.mem.used),
+        human(s.mem.total),
+        human(s.mem.available)
+    );
+    if s.mem.swap_total > 0 {
+        println!(
+            "swap   {:.1}%  {} / {}",
+            s.mem.swap_pct(),
+            human(s.mem.swap_used),
+            human(s.mem.swap_total)
+        );
+    }
+    println!("load   {:.2} {:.2} {:.2}", s.load[0], s.load[1], s.load[2]);
+    println!("procs  {}", s.procs.len());
+
+    let mut top = s.procs.clone();
+    top.sort_by(|a, b| b.cpu.total_cmp(&a.cpu));
+    println!("\n{:>7}  {:>6}  {:>9}  COMMAND", "PID", "CPU%", "RSS");
+    for p in top.iter().take(10) {
+        println!("{:>7}  {:>6.1}  {:>9}  {}", p.pid, p.cpu, human(p.rss), p.name);
+    }
+    Ok(())
+}
+
+fn human(b: u64) -> String {
+    const U: [&str; 5] = ["B", "K", "M", "G", "T"];
+    let (mut v, mut i) = (b as f64, 0);
+    while v >= 1024.0 && i < U.len() - 1 {
+        v /= 1024.0;
+        i += 1;
+    }
+    format!("{v:.1}{}", U[i])
+}
+
+fn run(
+    terminal: &mut ratatui::DefaultTerminal,
+    app: &mut App,
+    collector: &mut impl Collector,
+) -> io::Result<()> {
+    let mut last_sample = Instant::now();
+
+    loop {
+        terminal.draw(|f| ui::draw(f, app))?;
+
+        // Poll with whatever is left of the sample interval: input stays
+        // responsive without spinning, and sampling stays on schedule.
+        let timeout = SAMPLE_INTERVAL.saturating_sub(last_sample.elapsed());
+        if event::poll(timeout)?
+            && let Event::Key(key) = event::read()?
+                && key.kind == KeyEventKind::Press {
+                    handle_key(app, key.code, key.modifiers);
+                }
+
+        if last_sample.elapsed() >= SAMPLE_INTERVAL {
+            // Sampling continues while paused — that is the whole point. The
+            // cursor stays put, the buffer keeps filling behind it.
+            app.push(collector.sample()?);
+            app.clamp_selection();
+            last_sample = Instant::now();
+        }
+
+        if app.should_quit {
+            return Ok(());
+        }
+    }
+}
+
+fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
+    if app.editing_filter {
+        match code {
+            KeyCode::Enter | KeyCode::Esc => app.editing_filter = false,
+            KeyCode::Backspace => {
+                app.filter.pop();
+                app.clamp_selection();
+            }
+            KeyCode::Char(c) => {
+                app.filter.push(c);
+                app.clamp_selection();
+            }
+            _ => {}
+        }
+        return;
+    }
+
+    match code {
+        KeyCode::Char('q') | KeyCode::Esc => app.should_quit = true,
+        KeyCode::Char('c') if mods.contains(KeyModifiers::CONTROL) => app.should_quit = true,
+
+        // Scrubbing. Shift jumps ten samples at a time for crossing a long
+        // buffer without holding the key down.
+        KeyCode::Left | KeyCode::Char('h') => {
+            let step = if mods.contains(KeyModifiers::SHIFT) { 10 } else { 1 };
+            app.history.scrub(-step);
+            app.clamp_selection();
+        }
+        KeyCode::Right | KeyCode::Char('l') => {
+            let step = if mods.contains(KeyModifiers::SHIFT) { 10 } else { 1 };
+            app.history.scrub(step);
+            app.clamp_selection();
+        }
+        KeyCode::Char(' ') => {
+            // Space toggles: pause pins the cursor where it is, resume returns
+            // to the live edge.
+            if app.history.is_live() {
+                app.history.scrub(-1);
+            } else {
+                app.history.goto_live();
+            }
+            app.clamp_selection();
+        }
+        KeyCode::Home => {
+            app.history.goto_oldest();
+            app.clamp_selection();
+        }
+        KeyCode::End => {
+            app.history.goto_live();
+            app.clamp_selection();
+        }
+
+        KeyCode::Up | KeyCode::Char('k') => app.select_delta(-1),
+        KeyCode::Down | KeyCode::Char('j') => app.select_delta(1),
+        KeyCode::PageUp => app.select_delta(-10),
+        KeyCode::PageDown => app.select_delta(10),
+
+        KeyCode::Char('s') => {
+            app.sort = app.sort.next();
+            app.selected = 0;
+        }
+        KeyCode::Char('/') => {
+            app.editing_filter = true;
+            app.filter.clear();
+        }
+        _ => {}
+    }
+}
+
+// Keep `Sort` reachable for tests and future keybindings without a warning.
+#[allow(dead_code)]
+fn _assert_sort_cycles() {
+    let _ = Sort::Cpu.next();
+}
