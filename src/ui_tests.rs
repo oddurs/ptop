@@ -629,7 +629,7 @@ fn show_tiers() {
         }
         app.theme = Theme::new(Palette::Classic, tier);
         app.history.scrub(-8);
-        let mut term = Terminal::new(TestBackend::new(96, 12)).unwrap();
+        let mut term = Terminal::new(TestBackend::new(96, 26)).unwrap();
         term.draw(|f| ui::draw(f, &app)).unwrap();
         let buf = term.backend().buffer();
         println!("\n=== {tier:?} ===");
@@ -667,4 +667,76 @@ fn the_default_theme_is_the_colour_vision_safe_one() {
     assert_eq!(app.theme, Theme::default());
     assert_eq!(Palette::default(), Palette::Safe);
     assert_ne!(app.theme.ok, ratatui::style::Color::Green);
+}
+
+#[test]
+fn every_panel_border_uses_the_chrome_token() {
+    // Scans the left and right edge columns only. Glyph-matching the whole
+    // buffer looked equivalent and was not: `tree.rs` draws its spine with
+    // │ ├ └, so with tree mode on the scan flagged a spine glyph inside a
+    // table cell as an unstyled border. Panel edges are unambiguous — nothing
+    // but a border ever occupies column 0 or the last column.
+    //
+    // Tree mode is on here precisely so that regression cannot come back.
+    let mut app = App::new(60);
+    app.push(sample(50.0));
+    app.theme = Theme::new(Palette::Safe, Tier::TrueColor);
+    app.tree = true;
+
+    let (w, h) = (100u16, 30u16);
+    let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
+    term.draw(|f| ui::draw(f, &app)).unwrap();
+    let buf = term.backend().buffer();
+
+    let mut edges = 0;
+    for y in 0..h {
+        for x in [0, w - 1] {
+            let c = &buf[(x, y)];
+            if matches!(c.symbol(), "─" | "│" | "┌" | "┐" | "└" | "┘") {
+                edges += 1;
+                assert_eq!(
+                    c.fg, app.theme.chrome,
+                    "panel edge at ({x},{y}) is not chrome-coloured"
+                );
+            }
+        }
+    }
+    assert!(edges > 20, "expected panel edges, saw {edges}");
+}
+
+#[test]
+fn the_tree_spine_recedes_like_a_gridline() {
+    // The spine is structure, not data. It shares a cell with the process
+    // name, so this checks the two are styled differently rather than the
+    // whole cell inheriting one style.
+    let mut app = App::new(60);
+    let mut s = sample(10.0);
+    s.procs[1].ppid = 1;
+    s.procs[2].ppid = 42;
+    app.push(s);
+    app.theme = Theme::new(Palette::Safe, Tier::TrueColor);
+    app.tree = true;
+
+    let mut term = Terminal::new(TestBackend::new(100, 30)).unwrap();
+    term.draw(|f| ui::draw(f, &app)).unwrap();
+    let buf = term.backend().buffer();
+
+    let mut spine = 0;
+    for y in 0..30 {
+        // Column 0 is the panel edge; the spine lives inside the COMMAND cell.
+        for x in 1..99u16 {
+            let c = &buf[(x, y)];
+            if matches!(c.symbol(), "├" | "└" | "─") && buf[(0, y)].symbol() == "│" {
+                // Only count glyphs inside the table body, not panel rules.
+                if x > 40 {
+                    spine += 1;
+                    assert_eq!(
+                        c.fg, app.theme.chrome,
+                        "tree spine at ({x},{y}) is not chrome-coloured"
+                    );
+                }
+            }
+        }
+    }
+    assert!(spine > 0, "expected a tree spine to be drawn, saw none");
 }

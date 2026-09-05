@@ -27,7 +27,7 @@ pub fn draw(f: &mut Frame, app: &App) {
 
     let Some(sample) = app.history.current() else {
         f.render_widget(
-            Paragraph::new("collecting first sample…").block(bordered("ptop")),
+            Paragraph::new("collecting first sample…").block(bordered("ptop", &app.theme)),
             f.area(),
         );
         return;
@@ -40,8 +40,13 @@ pub fn draw(f: &mut Frame, app: &App) {
     draw_help(f, chunks[4], app);
 }
 
-fn bordered(title: &str) -> Block<'_> {
-    Block::default().borders(Borders::ALL).title(title)
+/// A panel. Borders take the most recessive token; the title a readable but
+/// still-recessive one, so neither competes with the figures inside.
+fn bordered<'a>(title: &'a str, theme: &Theme) -> Block<'a> {
+    Block::default()
+        .borders(Borders::ALL)
+        .border_style(theme.chrome_style())
+        .title(Span::styled(title, theme.title_style()))
 }
 
 fn fmt_bytes(b: u64) -> String {
@@ -136,8 +141,15 @@ fn draw_header(f: &mut Frame, area: Rect, app: &App, s: &Sample) {
     };
 
     f.render_widget(
-        Paragraph::new(Line::from(spans))
-            .block(Block::default().borders(Borders::ALL).title(title)),
+        Paragraph::new(Line::from(spans)).block(
+            // Built directly rather than via `bordered` because the title
+            // is a styled span (LIVE / PAUSED), but the border still takes
+            // the chrome token like every other panel.
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(app.theme.chrome_style())
+                .title(title),
+        ),
         area,
     );
 }
@@ -160,8 +172,10 @@ fn draw_cores(f: &mut Frame, area: Rect, s: &Sample, theme: &Theme) {
         .collect();
 
     f.render_widget(
-        Paragraph::new(Line::from(spans))
-            .block(bordered(&format!(" cores ({}) ", s.cpu_per_core.len()))),
+        Paragraph::new(Line::from(spans)).block(bordered(
+            &format!(" cores ({}) ", s.cpu_per_core.len()),
+            theme,
+        )),
         area,
     );
 }
@@ -226,7 +240,10 @@ fn draw_timeline(f: &mut Frame, area: Rect, app: &App) {
         fmt_lag(Duration::from_secs(app.history.capacity() as u64)),
     );
 
-    f.render_widget(Paragraph::new(lines).block(bordered(&title)), area);
+    f.render_widget(
+        Paragraph::new(lines).block(bordered(&title, &app.theme)),
+        area,
+    );
 }
 
 /// One row of graph. `row` counts from the top of a `rows`-tall graph.
@@ -323,7 +340,13 @@ fn draw_procs(f: &mut Frame, area: Rect, app: &App) {
                 cells.push(io_cell(collected, p.io, false, &app.theme));
                 cells.push(io_cell(collected, p.io, true, &app.theme));
             }
-            cells.push(Cell::from(format!("{}{}", r.prefix, p.name)));
+            // The spine is structural, not data: it takes the chrome token so
+            // it recedes the way a gridline should, while the name stays at
+            // full contrast.
+            cells.push(Cell::from(Line::from(vec![
+                Span::styled(r.prefix.clone(), app.theme.chrome_style()),
+                Span::raw(p.name.clone()),
+            ])));
             Row::new(cells).style(style)
         })
         .collect();
@@ -333,8 +356,7 @@ fn draw_procs(f: &mut Frame, area: Rect, app: &App) {
         header_cells.extend(["DISK R", "DISK W"]);
     }
     header_cells.push("COMMAND");
-    let header = Row::new(header_cells)
-        .style(Style::default().add_modifier(Modifier::BOLD | Modifier::REVERSED));
+    let header = Row::new(header_cells).style(app.theme.table_header_style());
 
     let title = format!(
         " processes ({}) — sort: {}{}{} ",
@@ -360,7 +382,7 @@ fn draw_procs(f: &mut Frame, area: Rect, app: &App) {
 
     let table = Table::new(rows, widths)
         .header(header)
-        .block(bordered(&title));
+        .block(bordered(&title, &app.theme));
 
     f.render_widget(table, area);
 }

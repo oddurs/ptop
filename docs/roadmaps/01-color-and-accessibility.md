@@ -107,7 +107,7 @@ Every shipped theme passes. Runs in existing CI with no new dependency.
 
 ---
 
-## C5 — Recessive chrome  ·  `S`
+## C5 — Recessive chrome  ·  `S`  ·  **DONE**
 
 **What.** Borders, gridlines, axis labels and inactive text move to a token one
 step off the surface, not default foreground.
