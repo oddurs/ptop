@@ -43,6 +43,10 @@ impl Collector for SysinfoCollector {
             .iter()
             .map(|(pid, p)| ProcSample {
                 pid: pid.as_u32() as i32,
+                // sysinfo reports no parent for processes this user does not
+                // own, so on macOS roughly a third of pids come back with 0 and
+                // the tree view shows them as roots. The /proc backend has real
+                // parentage for everything.
                 ppid: p.parent().map(|p| p.as_u32() as i32).unwrap_or(0),
                 name: p.name().to_string_lossy().into_owned(),
                 user: p

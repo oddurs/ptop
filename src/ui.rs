@@ -291,23 +291,27 @@ fn cursor_row(
 }
 
 fn draw_procs(f: &mut Frame, area: Rect, app: &App) {
-    let procs = app.visible_procs();
+    let rows_data = app.visible_rows();
     let rows_visible = area.height.saturating_sub(3) as usize;
 
     // Keep the selected row on screen while scrolling through a long list.
     let offset = app.selected.saturating_sub(rows_visible.saturating_sub(1));
 
-    let rows: Vec<Row> = procs
+    let rows: Vec<Row> = rows_data
         .iter()
         .enumerate()
         .skip(offset)
         .take(rows_visible)
-        .map(|(i, p)| {
-            let style = if i == app.selected {
-                Style::default().bg(Color::DarkGray).add_modifier(Modifier::BOLD)
-            } else {
-                Style::default()
-            };
+        .map(|(i, r)| {
+            let p = r.proc;
+            let mut style = Style::default();
+            if i == app.selected {
+                style = style.bg(Color::DarkGray).add_modifier(Modifier::BOLD);
+            } else if r.context_only {
+                // Present only as an ancestor of a filter match: visible for
+                // parentage, but clearly not itself a hit.
+                style = style.add_modifier(Modifier::DIM);
+            }
             Row::new(vec![
                 Cell::from(p.pid.to_string()),
                 Cell::from(p.user.to_string()),
@@ -315,7 +319,7 @@ fn draw_procs(f: &mut Frame, area: Rect, app: &App) {
                 Cell::from(fmt_bytes(p.rss)),
                 Cell::from(p.state.to_string()),
                 Cell::from(p.threads.to_string()),
-                Cell::from(p.name.clone()),
+                Cell::from(format!("{}{}", r.prefix, p.name)),
             ])
             .style(style)
         })
@@ -325,9 +329,10 @@ fn draw_procs(f: &mut Frame, area: Rect, app: &App) {
         .style(Style::default().add_modifier(Modifier::BOLD | Modifier::REVERSED));
 
     let title = format!(
-        " processes ({}) — sort: {} ",
-        procs.len(),
-        app.sort.label()
+        " processes ({}) — sort: {}{} ",
+        rows_data.len(),
+        app.sort.label(),
+        if app.tree { " · tree" } else { "" }
     );
 
     let table = Table::new(

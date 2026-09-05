@@ -39,6 +39,7 @@ cargo build --release
 | `Home` / `End` | jump to oldest / live |
 | `↑` / `↓` | select a process |
 | `s` | cycle sort column |
+| `t` | toggle the process tree |
 | `/` | filter by name or pid |
 
 `ptop --once` prints a single plain-text sample and exits, for scripts and cron.
@@ -108,9 +109,19 @@ them:
   terminals that cannot render braille. Any Unicode-dependent drawing needs a
   plain-ASCII path.
 
-Braille rendering and timeline zoom are now implemented (`src/glyphs.rs`,
-`History::peak_slots`). Still to come: column-driven collection flags and the
-process tree.
+Braille rendering, timeline zoom, and the process tree are implemented
+(`src/glyphs.rs`, `History::peak_slots`, `src/tree.rs`). Still to come:
+column-driven collection flags, which should land together with the first
+expensive gated column rather than on their own.
+
+The tree is a view over `ppid`, which every retained sample already carries, so
+the tree you see while scrubbed back is the real hierarchy from that moment.
+Every process appears exactly once even when `ppid` is corrupt or cyclic, and a
+process orphaned between samples becomes a root rather than disappearing.
+
+**macOS caveat:** `sysinfo` reports no parent for processes the user does not
+own, so about a third of pids arrive with `ppid = 0` and appear as roots. The
+`/proc` backend has real parentage for everything.
 
 ## Status
 

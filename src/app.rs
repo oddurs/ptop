@@ -3,6 +3,9 @@
 use crate::glyphs::GlyphSet;
 use crate::history::History;
 use crate::sample::{ProcSample, Sample};
+use crate::tree::{self, TreeRow};
+use std::cmp::Ordering;
+use std::collections::HashSet;
 
 /// Samples per display slot.
 ///
@@ -44,6 +47,18 @@ impl Sort {
         }
     }
 
+    /// Order two processes under this sort. Shared by the flat table and by
+    /// sibling ordering inside the tree, so both agree.
+    pub fn compare(self, a: &ProcSample, b: &ProcSample) -> Ordering {
+        match self {
+            // Descending for resource columns: the interesting rows go top.
+            Sort::Cpu => b.cpu.total_cmp(&a.cpu),
+            Sort::Mem => b.rss.cmp(&a.rss),
+            Sort::Pid => a.pid.cmp(&b.pid),
+            Sort::Name => a.name.to_lowercase().cmp(&b.name.to_lowercase()),
+        }
+    }
+
     pub fn next(self) -> Self {
         match self {
             Sort::Cpu => Sort::Mem,
@@ -62,6 +77,7 @@ pub struct App {
     pub filter: String,
     pub editing_filter: bool,
     pub should_quit: bool,
+    pub tree: bool,
     /// Index into [`ZOOM_LEVELS`].
     zoom_idx: usize,
     pub glyphs: GlyphSet,
@@ -76,6 +92,7 @@ impl App {
             filter: String::new(),
             editing_filter: false,
             should_quit: false,
+            tree: false,
             zoom_idx: 0,
             glyphs: GlyphSet::default(),
         }
@@ -100,34 +117,47 @@ impl App {
         self.history.push(s);
     }
 
-    /// Processes of the displayed sample, filtered and sorted for the table.
-    pub fn visible_procs(&self) -> Vec<&ProcSample> {
+    /// Rows of the displayed sample, filtered and ordered for the table.
+    ///
+    /// Flat and tree modes return the same row type so the renderer has one
+    /// path; a flat row is simply one with an empty prefix.
+    pub fn visible_rows(&self) -> Vec<TreeRow<'_>> {
         let Some(sample) = self.history.current() else {
             return Vec::new();
         };
         let needle = self.filter.to_lowercase();
+
+        if self.tree {
+            // A filtered tree keeps matches plus their ancestors; `tree::build`
+            // works out the ancestry, so it only needs the direct matches.
+            let matched: Option<HashSet<i32>> = (!needle.is_empty()).then(|| {
+                sample
+                    .procs
+                    .iter()
+                    .filter(|p| matches(p, &needle))
+                    .map(|p| p.pid)
+                    .collect()
+            });
+            return tree::build(&sample.procs, self.sort, matched.as_ref());
+        }
+
         let mut v: Vec<&ProcSample> = sample
             .procs
             .iter()
-            .filter(|p| {
-                needle.is_empty()
-                    || p.name.to_lowercase().contains(&needle)
-                    || p.pid.to_string().contains(&needle)
-            })
+            .filter(|p| matches(p, &needle))
             .collect();
-
-        match self.sort {
-            // Descending for the resource columns: the interesting rows go top.
-            Sort::Cpu => v.sort_by(|a, b| b.cpu.total_cmp(&a.cpu)),
-            Sort::Mem => v.sort_by_key(|p| std::cmp::Reverse(p.rss)),
-            Sort::Pid => v.sort_by_key(|p| p.pid),
-            Sort::Name => v.sort_by_key(|p| p.name.to_lowercase()),
-        }
-        v
+        v.sort_by(|a, b| self.sort.compare(a, b));
+        v.into_iter()
+            .map(|p| TreeRow {
+                proc: p,
+                prefix: String::new(),
+                context_only: false,
+            })
+            .collect()
     }
 
     pub fn select_delta(&mut self, delta: isize) {
-        let n = self.visible_procs().len();
+        let n = self.visible_rows().len();
         if n == 0 {
             self.selected = 0;
             return;
@@ -139,11 +169,18 @@ impl App {
     /// Keep the selection in range after the list shrinks (filter, or a process
     /// exiting between samples).
     pub fn clamp_selection(&mut self) {
-        let n = self.visible_procs().len();
+        let n = self.visible_rows().len();
         if n == 0 {
             self.selected = 0;
         } else if self.selected >= n {
             self.selected = n - 1;
         }
     }
+}
+
+/// A process matches the filter by name or by pid. An empty filter matches all.
+fn matches(p: &ProcSample, needle: &str) -> bool {
+    needle.is_empty()
+        || p.name.to_lowercase().contains(needle)
+        || p.pid.to_string().contains(needle)
 }

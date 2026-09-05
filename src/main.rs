@@ -12,6 +12,7 @@ mod collect;
 mod glyphs;
 mod history;
 mod sample;
+mod tree;
 mod ui;
 
 #[cfg(test)]
@@ -46,6 +47,7 @@ KEYS:
     Home/End        jump to oldest / live
     Up/Down         select a process
     s               cycle sort column
+    t               toggle the process tree
     /               filter by name or pid
 ";
 
@@ -268,6 +270,10 @@ fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
 
         KeyCode::Char('s') => {
             app.sort = app.sort.next();
+            app.selected = 0;
+        }
+        KeyCode::Char('t') => {
+            app.tree = !app.tree;
             app.selected = 0;
         }
         KeyCode::Char('/') => {

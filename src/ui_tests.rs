@@ -120,7 +120,7 @@ fn sort_by_mem_puts_the_biggest_process_first() {
     let mut app = App::new(60);
     app.push(sample(10.0));
     app.sort = crate::app::Sort::Mem;
-    let names: Vec<&str> = app.visible_procs().iter().map(|p| p.name.as_str()).collect();
+    let names: Vec<&str> = app.visible_rows().iter().map(|r| r.proc.name.as_str()).collect();
     assert_eq!(names, vec!["postgres", "nginx", "init"]);
 }
 
@@ -290,5 +290,65 @@ fn timeline_fills_its_panel_with_no_blank_rows() {
             inner.chars().any(|c| c != ' ' && c != '│'),
             "row {y} is blank: {row:?}"
         );
+    }
+}
+
+#[test]
+fn tree_mode_renders_nesting_in_the_table() {
+    let mut app = App::new(60);
+    let mut s = sample(10.0);
+    // postgres(42) parents nginx(99); init(1) parents postgres.
+    s.procs = vec![
+        proc_named(1, "init", 0.1, 1 << 20),
+        proc_named(42, "postgres", 88.0, 512 << 20),
+        proc_named(99, "nginx", 12.5, 32 << 20),
+    ];
+    s.procs[1].ppid = 1;
+    s.procs[2].ppid = 42;
+    app.push(s);
+    app.tree = true;
+
+    let out = render(&app, 100, 30);
+    assert!(out.contains("tree"), "title should say the tree is on");
+    assert!(out.contains("└─ postgres") || out.contains("├─ postgres"));
+    assert!(out.contains("nginx"));
+}
+
+#[test]
+fn tree_mode_keeps_every_process_visible() {
+    let mut app = App::new(60);
+    app.push(sample(10.0));
+    let flat = app.visible_rows().len();
+    app.tree = true;
+    assert_eq!(app.visible_rows().len(), flat, "tree must not drop rows");
+}
+
+#[test]
+fn tree_survives_a_tiny_terminal() {
+    let mut app = App::new(60);
+    app.push(sample(10.0));
+    app.tree = true;
+    for (w, h) in [(20, 10), (4, 3), (1, 1)] {
+        render(&app, w, h);
+    }
+}
+
+#[test]
+#[ignore = "visual check: cargo test -- --ignored --nocapture show_real_tree"]
+fn show_real_tree() {
+    use crate::collect::{Collector, Platform};
+    let mut c = Platform::new().unwrap();
+    let mut app = App::new(60);
+    app.push(c.sample().unwrap());
+    app.tree = true;
+    app.sort = crate::app::Sort::Pid;
+
+    let rows = app.visible_rows();
+    println!("{} processes, {} rows", app.history.current().unwrap().procs.len(), rows.len());
+    let depth = |r: &crate::tree::TreeRow| r.prefix.chars().count() / 3;
+    println!("max depth: {}", rows.iter().map(depth).max().unwrap_or(0));
+    println!("roots: {}", rows.iter().filter(|r| r.prefix.is_empty()).count());
+    for r in rows.iter().take(28) {
+        println!("{:>7} {}{}", r.proc.pid, r.prefix, r.proc.name);
     }
 }
