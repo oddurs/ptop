@@ -9,6 +9,8 @@
 
 mod app;
 mod collect;
+#[cfg(test)]
+mod cvd;
 mod glyphs;
 mod history;
 mod sample;

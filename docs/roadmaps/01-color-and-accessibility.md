@@ -90,7 +90,7 @@ if the display is only legible in colour, no palette fixes it.
 
 ---
 
-## C4 — Palette validation in CI  ·  `S`
+## C4 — Palette validation in CI  ·  `S`  ·  **DONE**
 
 **What.** A Rust test computing OKLab ΔE between adjacent palette slots under
 normal, protan, deutan and tritan simulation. Fails the build below threshold.
