@@ -11,7 +11,7 @@ them responsively when the panel gets too small (`should_hide_x_label`,
 
 ---
 
-## G1 — Threshold hairline  ·  `S`
+## G1 — Threshold hairline  ·  `S`  ·  **DONE**
 
 **What.** A dim horizontal rule across the timeline at the warn threshold (and
 optionally critical), drawn in the chrome token.
