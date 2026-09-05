@@ -4,6 +4,7 @@ use crate::collect::Needs;
 use crate::glyphs::GlyphSet;
 use crate::history::History;
 use crate::sample::{ProcSample, Sample};
+use crate::theme::Theme;
 use crate::tree::{self, TreeRow};
 use std::cmp::Ordering;
 use std::collections::HashSet;
@@ -90,6 +91,7 @@ pub struct App {
     /// Index into [`ZOOM_LEVELS`].
     zoom_idx: usize,
     pub glyphs: GlyphSet,
+    pub theme: Theme,
 }
 
 impl App {
@@ -106,6 +108,7 @@ impl App {
             io_ratchet: false,
             zoom_idx: 0,
             glyphs: GlyphSet::default(),
+            theme: Theme::default(),
         }
     }
 

@@ -454,3 +454,77 @@ fn only_unreadable_processes_prompt_for_root() {
     assert!(out.contains('—'), "no prior reading still shows a dash");
     assert!(!out.contains("need root"), "but must not blame permissions");
 }
+
+#[test]
+#[ignore = "digest for cross-branch comparison: cargo test -- --ignored --nocapture render_digest"]
+fn render_digest() {
+    // Symbol *and* style per cell, so a colour change shows up. Used to prove
+    // a refactor is visually a no-op.
+    //
+    // Deliberately hermetic: timestamps come from a fixed epoch rather than
+    // `now()`, because the header renders elapsed lag and a scheduler stall
+    // mid-loop would tick it over a second and change the hash — a false
+    // "rendering changed" verdict during exactly the comparison this exists
+    // for.
+    //
+    // Also renders every state that owns a distinct token. A digest that never
+    // enters the live branch or the filter prompt would stay unchanged if
+    // someone repainted them, and would then be quietly lying.
+    fn fixed_sample(cpu: f32, age_secs: u64) -> Sample {
+        let mut s = sample(cpu);
+        s.at = std::time::SystemTime::UNIX_EPOCH
+            + std::time::Duration::from_secs(1_700_000_000 - age_secs);
+        s.io_collected = true;
+        s.io_denied = 1;
+        s
+    }
+
+    let build = || {
+        let mut app = App::new(600);
+        for i in (0..120).rev() {
+            app.push(fixed_sample((i as f32 * 0.7).sin().abs() * 95.0, i));
+        }
+        app
+    };
+
+    let mut out = String::new();
+    for (label, prep) in [("paused+tree+io", 0u8), ("live", 1), ("filter-prompt", 2)] {
+        let mut app = build();
+        match prep {
+            0 => {
+                app.history.scrub(-9);
+                app.toggle_io();
+                app.tree = true;
+            }
+            1 => {} // stays live: exercises theme.live
+            _ => {
+                app.editing_filter = true;
+                app.filter = "pg".into();
+            }
+        }
+        let mut term = Terminal::new(TestBackend::new(110, 34)).unwrap();
+        term.draw(|f| ui::draw(f, &app)).unwrap();
+        let buf = term.backend().buffer();
+        out.push_str(label);
+        for y in 0..buf.area.height {
+            for x in 0..buf.area.width {
+                let c = &buf[(x, y)];
+                out.push_str(&format!(
+                    "{}|{:?}|{:?}|{:?};",
+                    c.symbol(),
+                    c.fg,
+                    c.bg,
+                    c.modifier
+                ));
+            }
+        }
+    }
+
+    // A hash keeps the output to one line; any cell difference changes it.
+    let mut h: u64 = 1469598103934665603;
+    for b in out.bytes() {
+        h ^= b as u64;
+        h = h.wrapping_mul(1099511628211);
+    }
+    println!("RENDER_DIGEST {h:016x}");
+}

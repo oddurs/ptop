@@ -27,7 +27,7 @@ read monotonically: 50% CPU looks more prominent than 100%.
 
 ---
 
-## C1 — Theme tokens  ·  `S`
+## C1 — Theme tokens  ·  `S`  ·  **DONE**
 
 **What.** A `Theme` struct of named semantic tokens — `ok`, `warn`, `critical`,
 `chrome`, `label_dim`, `cursor`, `series_cpu`, `series_mem` — threaded through
