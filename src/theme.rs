@@ -486,8 +486,18 @@ impl Theme {
     }
 
     /// The process table's header row.
+    ///
+    /// Bold and underlined rather than reverse video. A full-width reversed bar
+    /// is the loudest thing on screen, and it is a column label — it should not
+    /// outweigh the processes beneath it. Reverse video stays at the mono tier,
+    /// where weight alone is not enough separation.
     pub fn table_header_style(&self) -> Style {
-        Style::default().add_modifier(Modifier::BOLD | Modifier::REVERSED)
+        let base = Style::default().add_modifier(Modifier::BOLD);
+        if self.tier.has_color() {
+            base.add_modifier(Modifier::UNDERLINED).fg(self.text_dim)
+        } else {
+            base.add_modifier(Modifier::REVERSED)
+        }
     }
 
     /// Panel titles. Readable — they carry real information — but a step back
