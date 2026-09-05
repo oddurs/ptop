@@ -32,7 +32,7 @@ hides it. Present at every zoom level.
 
 ---
 
-## G2 — Y-axis anchors  ·  `S`
+## G2 — Y-axis anchors  ·  `S`  ·  **DONE**
 
 **What.** `100` and `0` in a narrow left gutter of the timeline, dropped when
 the panel is too short or narrow.

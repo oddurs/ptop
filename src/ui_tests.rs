@@ -878,3 +878,169 @@ fn data_always_wins_the_cell_over_the_rule() {
         "rule drew over cells that contain data"
     );
 }
+
+/// Column of the scrub cursor marker in a rendered timeline, if drawn.
+fn cursor_column(app: &App, w: u16, h: u16) -> Option<u16> {
+    let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
+    term.draw(|f| ui::draw_timeline_for_test(f, f.area(), app))
+        .unwrap();
+    let buf = term.backend().buffer();
+    for y in 0..h {
+        for x in 0..w {
+            if matches!(buf[(x, y)].symbol(), "▌" | "▐" | "^") {
+                return Some(x);
+            }
+        }
+    }
+    None
+}
+
+#[test]
+fn the_cursor_stays_over_its_own_column_once_the_gutter_exists() {
+    // The gutter shifts the graph right; if the cursor row is not padded by
+    // the same amount the marker points four columns off the sample it claims.
+    //
+    // Asserted as an exact column, computed the way the renderer computes it.
+    // An approximate assertion ("right of the gutter", "past halfway") passed
+    // happily with the padding removed — verified — which is no test at all.
+    let (w, h) = (100u16, 12u16);
+    let n = 40usize;
+    let mut app = App::new(600);
+    for i in (0..n).rev() {
+        app.push(sample_at(50.0, i as u64));
+    }
+    app.theme = Theme::new(Palette::Safe, Tier::TrueColor);
+    app.history.scrub(-7);
+
+    let gutter = 4usize;
+    let graph_w = (w as usize - 2) - gutter;
+    let spc = app.glyphs.samples_per_cell();
+    let slots = graph_w * spc;
+    let zoom = crate::app::effective_zoom(app.zoom(), n, slots);
+    let shown = (slots * zoom).min(n);
+    let dropped = app.history.len() - shown;
+    let idx = app.history.cursor_index() - dropped;
+    let slot = crate::history::slot_of_index(idx, shown, zoom, slots);
+    let expected = 1 + gutter as u16 + (slot / spc) as u16;
+
+    assert_eq!(
+        cursor_column(&app, w, h),
+        Some(expected),
+        "cursor marker is not over the sample it points at"
+    );
+}
+
+/// The gutter columns of every graph row, as one string.
+///
+/// Scoped to the gutter rather than the whole frame: asserting on the full
+/// render made the narrow case depend on the panel title never containing the
+/// digits "100", which is unrelated to what the test is about.
+fn gutter_text(app: &App, w: u16, h: u16) -> String {
+    let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
+    term.draw(|f| ui::draw_timeline_for_test(f, f.area(), app))
+        .unwrap();
+    let buf = term.backend().buffer();
+    let graph_rows = (h as usize - 2).saturating_sub(2).max(1);
+    (0..graph_rows)
+        .map(|row| {
+            (1..5u16.min(w - 1))
+                .map(|x| buf[(x, 1 + row as u16)].symbol())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+#[test]
+fn the_gutter_carries_the_scale_and_yields_on_a_narrow_panel() {
+    let mut app = App::new(600);
+    for i in (0..50).rev() {
+        app.push(sample_at(50.0, i));
+    }
+    app.theme = Theme::new(Palette::Safe, Tier::TrueColor);
+
+    let wide = gutter_text(&app, 100, 12);
+    assert!(
+        wide.contains("100"),
+        "wide panel lost the top anchor:\n{wide}"
+    );
+    assert!(
+        wide.contains('0'),
+        "wide panel lost the zero anchor:\n{wide}"
+    );
+
+    // Four columns of axis is a poor trade against four columns of history
+    // when there is barely any room.
+    let narrow = gutter_text(&app, 24, 12);
+    assert!(
+        !narrow.contains("100"),
+        "narrow panel should drop the gutter, got:\n{narrow}"
+    );
+}
+
+#[test]
+fn a_section_too_short_for_both_ends_carries_no_axis_at_all() {
+    // A one-row section spans the whole 0..100 range. Labelling its top `100`
+    // implies the bottom is not zero, and `0` never appears anywhere — the
+    // axis states something false rather than merely being absent.
+    //
+    // Checked per section: the two graphs are sized independently, so a short
+    // CPU section can sit above a MEM section that legitimately has a scale.
+    let mut app = App::new(600);
+    for i in (0..50).rev() {
+        app.push(sample_at(50.0, i));
+    }
+    app.theme = Theme::new(Palette::Safe, Tier::TrueColor);
+
+    for h in [5u16, 6, 7, 8, 12] {
+        let rows: Vec<String> = gutter_text(&app, 60, h)
+            .lines()
+            .map(str::to_string)
+            .collect();
+        let graph_rows = (h as usize - 2).saturating_sub(2).max(1);
+        let cpu_rows = (graph_rows * 3 / 5).max(1);
+        let mem_rows = graph_rows - cpu_rows;
+
+        for (name, range, n) in [
+            ("cpu", 0..cpu_rows, cpu_rows),
+            ("mem", cpu_rows..graph_rows, mem_rows),
+        ] {
+            let section: String = rows.get(range).unwrap_or_default().join("");
+            let labelled = section.contains("100") || section.contains('0');
+            assert_eq!(
+                labelled,
+                n >= 2,
+                "h={h}: {name} section of {n} row(s) labelled={labelled}, in:\n{section}"
+            );
+        }
+    }
+}
+
+#[test]
+fn the_gutter_never_overlaps_the_graph() {
+    // Every graph row must start with the gutter, so no glyph can be drawn
+    // under the axis labels.
+    let (w, h) = (100u16, 12u16);
+    let mut app = App::new(600);
+    for i in (0..200).rev() {
+        app.push(sample_at(100.0, i)); // saturated: bars everywhere
+    }
+    app.theme = Theme::new(Palette::Safe, Tier::TrueColor);
+
+    let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
+    term.draw(|f| ui::draw_timeline_for_test(f, f.area(), &app))
+        .unwrap();
+    let buf = term.backend().buffer();
+
+    let graph_rows = (h as usize - 2).saturating_sub(2).max(1);
+    for row in 0..graph_rows {
+        let y = 1 + row as u16;
+        for x in 1..5u16 {
+            let s = buf[(x, y)].symbol();
+            assert!(
+                s == " " || s.chars().all(|c| c.is_ascii_digit()),
+                "graph glyph {s:?} drawn inside the gutter at ({x},{y})"
+            );
+        }
+    }
+}
