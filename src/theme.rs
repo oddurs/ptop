@@ -179,7 +179,9 @@ impl Theme {
             series_mem: Color::Magenta,
             chrome: Color::DarkGray,
             text: Color::Reset,
-            text_dim: Color::DarkGray,
+            // Gray, not DarkGray: chrome takes DarkGray, and collapsing both
+            // onto one slot destroys the border/title hierarchy at this tier.
+            text_dim: Color::Gray,
             selection_bg: Color::DarkGray,
             live: Color::Cyan,
         }
@@ -273,7 +275,9 @@ impl Theme {
             series_mem: Color::Green,
             chrome: Color::DarkGray,
             text: Color::Reset,
-            text_dim: Color::DarkGray,
+            // Gray, not DarkGray: chrome takes DarkGray, and collapsing both
+            // onto one slot destroys the border/title hierarchy at this tier.
+            text_dim: Color::Gray,
             selection_bg: Color::DarkGray,
             live: Color::Green,
         }
@@ -405,6 +409,30 @@ impl Theme {
         Style::default()
             .add_modifier(Modifier::BOLD)
             .add_modifier(Modifier::REVERSED)
+    }
+
+    /// Panel borders and rules.
+    ///
+    /// The most recessive thing on screen. Chrome should be findable when
+    /// looked for and invisible when not — it competes with the data for
+    /// attention otherwise, and the data is the point.
+    pub fn chrome_style(&self) -> Style {
+        if self.tier.has_color() {
+            Style::default().fg(self.chrome)
+        } else {
+            Style::default().add_modifier(Modifier::DIM)
+        }
+    }
+
+    /// The process table's header row.
+    pub fn table_header_style(&self) -> Style {
+        Style::default().add_modifier(Modifier::BOLD | Modifier::REVERSED)
+    }
+
+    /// Panel titles. Readable — they carry real information — but a step back
+    /// from the figures inside the panel.
+    pub fn title_style(&self) -> Style {
+        self.dim_style()
     }
 
     /// Recessive text: labels, legends, the help line.
@@ -760,6 +788,54 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn chrome_and_title_never_collapse_onto_one_slot() {
+        // The hierarchy has to exist at every colour tier, including the one
+        // where it cannot be measured — ANSI slots have no value to compare, so
+        // distinctness is all that can be asserted there.
+        for palette in [Palette::Safe, Palette::Classic] {
+            for tier in [Tier::Ansi16, Tier::Ansi256, Tier::TrueColor] {
+                let th = Theme::new(palette, tier);
+                assert_ne!(
+                    th.chrome, th.text_dim,
+                    "{palette:?}/{tier:?}: border and title share a slot"
+                );
+                assert_ne!(th.text_dim, th.text);
+            }
+        }
+    }
+
+    #[test]
+    fn chrome_recedes_behind_the_data() {
+        // A visual hierarchy, asserted: border < title < data. Without this the
+        // box drawing competes with the numbers inside it.
+        use crate::cvd::{contrast, to_rgb};
+        let surface = [0x1a, 0x1a, 0x19];
+        for palette in [Palette::Safe, Palette::Classic] {
+            let th = Theme::new(palette, Tier::TrueColor);
+            let c = |col| contrast(to_rgb(col).unwrap(), surface);
+            let (chrome, dim, data) = (c(th.chrome), c(th.text_dim), c(th.ok));
+            assert!(
+                chrome < dim && dim < data,
+                "{palette:?}: chrome {chrome:.2} / dim {dim:.2} / data {data:.2} \
+                 are not in recessive order"
+            );
+            // Recessive, but not invisible — a border nobody can find is worse
+            // than no border.
+            assert!(
+                chrome >= 1.5,
+                "{palette:?}: chrome at {chrome:.2}:1 is too faint"
+            );
+        }
+    }
+
+    #[test]
+    fn chrome_survives_the_mono_tier() {
+        let th = Theme::new(Palette::Safe, Tier::Mono);
+        assert!(th.chrome_style().add_modifier.contains(Modifier::DIM));
+        assert_eq!(th.chrome_style().fg, None);
     }
 
     #[test]
