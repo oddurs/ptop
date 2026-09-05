@@ -417,22 +417,71 @@ fn cursor_row(
     // The cursor is an index into the whole buffer; the graph shows a window of
     // the newest `n_values`, so rebase before locating it.
     let dropped = app.history.len().saturating_sub(n_values);
-    let idx = app.history.cursor_index().saturating_sub(dropped);
+
+    // The cursor can sit further back than the window reaches — press Home on a
+    // buffer longer than the panel is wide. The marker then pins to the left
+    // edge, and a readout beside it would state a figure for a sample that is
+    // not on screen, contradicting the very column it points at. Say so.
+    if app.history.cursor_index() < dropped {
+        let mut row = vec![' '; graph_w];
+        if let Some(c) = row.first_mut() {
+            *c = '◀';
+        }
+        return Line::from(vec![
+            Span::raw(pad),
+            Span::styled(
+                row.into_iter().collect::<String>(),
+                app.theme.cursor_style(),
+            ),
+        ]);
+    }
+
+    let idx = app.history.cursor_index() - dropped;
     let slot = history::slot_of_index(idx, n_values, zoom, slots);
 
-    let mut row = vec![' '; graph_w];
-    if let Some(cell) = row.get_mut(slot / spc) {
-        *cell = app.glyphs.cursor_marker(spc == 2 && slot % spc == 1);
+    let cell = (slot / spc).min(graph_w.saturating_sub(1));
+    let marker = app.glyphs.cursor_marker(spc == 2 && slot % spc == 1);
+
+    // The values at the cursor, beside the cursor. A terminal has no hover, so
+    // the scrub marker *is* the crosshair — and its readout has been living in
+    // the header, far from where the eye is actually fixed.
+    let readout = app
+        .history
+        .current()
+        // One decimal, matching the header: both are on screen while
+        // scrubbing, so rounding them differently makes a sample at 89.6% read
+        // `89.6` in one place and `90` in the other.
+        .map(|s| format!("CPU {:.1}%  MEM {:.1}%", s.cpu_total, s.mem.used_pct()));
+
+    // Prefer to the right of the marker; fall back to the left when the cursor
+    // is near the right edge, so the text can never overflow the panel.
+    let mut spans = vec![Span::raw(pad)];
+    let right_room = graph_w.saturating_sub(cell + 1);
+    let left_room = cell;
+    match readout {
+        Some(text) if right_room > text.chars().count() => {
+            spans.push(Span::raw(" ".repeat(cell)));
+            spans.push(Span::styled(marker.to_string(), app.theme.cursor_style()));
+            spans.push(Span::styled(format!(" {text}"), app.theme.dim_style()));
+            let used = cell + 1 + 1 + text.chars().count();
+            spans.push(Span::raw(" ".repeat(graph_w - used)));
+        }
+        Some(text) if left_room > text.chars().count() => {
+            let lead = cell - text.chars().count() - 1;
+            spans.push(Span::raw(" ".repeat(lead)));
+            spans.push(Span::styled(format!("{text} "), app.theme.dim_style()));
+            spans.push(Span::styled(marker.to_string(), app.theme.cursor_style()));
+            spans.push(Span::raw(" ".repeat(right_room)));
+        }
+        // No room either side: the marker alone still locates the sample, and
+        // the header still carries the figures.
+        _ => {
+            spans.push(Span::raw(" ".repeat(cell)));
+            spans.push(Span::styled(marker.to_string(), app.theme.cursor_style()));
+            spans.push(Span::raw(" ".repeat(right_room)));
+        }
     }
-    // The marker must sit under its own column, so the gutter is padded in
-    // rather than the row being shifted.
-    Line::from(vec![
-        Span::raw(pad),
-        Span::styled(
-            row.into_iter().collect::<String>(),
-            app.theme.cursor_style(),
-        ),
-    ])
+    Line::from(spans)
 }
 
 fn draw_procs(f: &mut Frame, area: Rect, app: &App) {

@@ -65,7 +65,7 @@ row.
 
 ---
 
-## G4 — Value readout at the cursor  ·  `S`
+## G4 — Value readout at the cursor  ·  `S`  ·  **DONE**
 
 **What.** When scrubbed, print the value at the cursor column — near the cursor,
 not only in the header.
@@ -103,6 +103,39 @@ threshold state.
 **Depends on.** `C1`, `G1`
 
 **Touches.** `src/ui.rs`
+
+---
+
+## G7 — The window should follow the cursor  ·  `M`
+
+**What.** When the scrub cursor moves to a sample outside the drawn window,
+scroll the window to include it instead of pinning the marker to the left edge.
+
+**Why.** Found while reviewing `G4`. The graph always draws the newest
+`slots × zoom` samples regardless of where the cursor is, so pressing `Home` on
+a buffer longer than the panel is wide scrubs to a sample that is not on screen.
+The process table updates to that moment, the header reports its lag — and the
+graph shows a different stretch of time entirely.
+
+`G4` made this honest rather than fixing it: the marker becomes `◀` and the
+readout is suppressed, because printing figures for an off-screen sample beside
+the column it appears to point at is worse than printing nothing. But scrubbing
+to somewhere you cannot see is still a poor answer for a tool whose whole
+premise is looking backwards.
+
+**The reason it was not simply fixed.** `History::peak_slots` is right-aligned
+by construction, and deliberately so — the newest sample is pinned to the right
+edge so slot boundaries do not shuffle sideways once per second. Letting the
+window start somewhere other than the live edge means that invariant needs a
+second, explicit anchor rather than an implicit one. That is a design change,
+not a patch.
+
+**Acceptance.** Scrubbing past the left edge scrolls the window. The newest
+sample still pins right whenever the cursor is inside the live window, so the
+live view does not shuffle. Zoom continues to work at any scroll position.
+`◀` remains for the case where the cursor is genuinely outside the buffer.
+
+**Touches.** `src/history.rs`, `src/ui.rs`
 
 ---
 
