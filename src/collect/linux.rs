@@ -67,6 +67,10 @@ pub struct ProcFs {
     prev_at: Option<SystemTime>,
     /// uid -> username, parsed once from /etc/passwd.
     users: HashMap<u32, Arc<str>>,
+    /// pid -> (start time, name). The start time is what makes this safe: a
+    /// recycled pid would otherwise inherit the dead process's name, which is
+    /// a correctness bug wearing an optimisation's clothes.
+    names: HashMap<i32, (u64, Arc<str>)>,
     /// Reused across every file read, so a sample allocates no buffers.
     buf: Vec<u8>,
     /// Reused path, so `/proc/<pid>/stat` costs no allocation either.
@@ -84,6 +88,7 @@ impl ProcFs {
             prev_proc_io: HashMap::new(),
             prev_at: None,
             users: parse_passwd(),
+            names: HashMap::new(),
             buf: vec![0; READ_BUF],
             path: String::with_capacity(32),
             // USER_HZ is fixed at 100 on effectively every Linux build. The
@@ -209,6 +214,7 @@ impl ProcFs {
             prev_proc_jiffies,
             prev_proc_io,
             users,
+            names,
             ticks_per_sec,
             page_size,
             prev_cores,
@@ -252,7 +258,8 @@ impl ProcFs {
                 .or_insert_with(|| Arc::from(uid.to_string().as_str()))
                 .clone();
 
-            let Some(mut p) = parse_proc_stat(pid, stat, elapsed_secs, user, &mut seen, &ctx)
+            let Some(mut p) =
+                parse_proc_stat(pid, stat, elapsed_secs, user, &mut seen, names, &ctx)
             else {
                 continue;
             };
@@ -267,6 +274,9 @@ impl ProcFs {
 
         // Drop counters for processes that have exited, or the maps grow
         // without bound on a busy box.
+        // Drop cached names for processes that have exited, or the map grows
+        // without bound exactly like the counters would.
+        names.retain(|pid, _| seen.contains_key(pid));
         *prev_proc_jiffies = seen;
         if needs.io {
             *prev_proc_io = seen_io;
@@ -313,12 +323,14 @@ fn read_proc_io(
 }
 
 /// Turn one `/proc/<pid>/stat` line into a sample.
+#[allow(clippy::too_many_arguments)]
 fn parse_proc_stat(
     pid: i32,
     stat: &str,
     elapsed_secs: f64,
     user: Arc<str>,
     seen: &mut HashMap<i32, u64>,
+    names: &mut HashMap<i32, (u64, Arc<str>)>,
     ctx: &StatCtx,
 ) -> Option<ProcSample> {
     // Field 2 is the executable name in parentheses, and it may contain spaces
@@ -326,7 +338,7 @@ fn parse_proc_stat(
     // it. Split on the last ')' instead.
     let close = stat.rfind(')')?;
     let open = stat.find('(')?;
-    let comm = stat.get(open + 1..close)?.to_string();
+    let comm = stat.get(open + 1..close)?;
     let rest: Vec<&str> = stat.get(close + 1..)?.split_whitespace().collect();
 
     // rest[0] is field 3 (state), so field N lives at rest[N - 3].
@@ -335,7 +347,21 @@ fn parse_proc_stat(
     let utime: u64 = rest.get(11)?.parse().ok()?;
     let stime: u64 = rest.get(12)?.parse().ok()?;
     let threads: u32 = rest.get(17)?.parse().unwrap_or(1);
+    // Field 22, the start time, in clock ticks since boot.
+    let starttime: u64 = rest.get(19)?.parse().unwrap_or(0);
     let rss_pages: u64 = rest.get(21)?.parse().unwrap_or(0);
+
+    // Reuse the name unless this is a different process wearing the same pid.
+    // Comparing the string as well would defeat the point — the comparison is
+    // the work being avoided — so the start time is the whole guard.
+    let name = match names.get(&pid) {
+        Some((t, n)) if *t == starttime => n.clone(),
+        _ => {
+            let n: Arc<str> = Arc::from(comm);
+            names.insert(pid, (starttime, n.clone()));
+            n
+        }
+    };
 
     let jiffies = utime + stime;
     seen.insert(pid, jiffies);
@@ -357,7 +383,7 @@ fn parse_proc_stat(
     Some(ProcSample {
         pid,
         ppid,
-        name: comm,
+        name,
         user,
         cpu,
         rss: rss_pages * ctx.page_size,
@@ -533,8 +559,17 @@ mod tests {
         // naive whitespace splitting.
         let line = "1234 ((evil) proc)) S 1 0 0 0 -1 4194560 100 0 0 0 \
                     55 45 0 0 20 0 8 0 12345 1000 512 0 0 0 0 0 0 0 0 0 0 0 0";
-        let p = parse_proc_stat(1234, line, 1.0, Arc::from("root"), &mut seen, &ctx(&pf)).unwrap();
-        assert_eq!(p.name, "(evil) proc)");
+        let p = parse_proc_stat(
+            1234,
+            line,
+            1.0,
+            Arc::from("root"),
+            &mut seen,
+            &mut HashMap::new(),
+            &ctx(&pf),
+        )
+        .unwrap();
+        assert_eq!(p.name.as_ref(), "(evil) proc)");
         assert_eq!(p.ppid, 1);
         assert_eq!(p.threads, 8);
         assert_eq!(p.state, 'S');
@@ -546,9 +581,101 @@ mod tests {
         let mut seen = HashMap::new();
         let line = "1 (init) S 0 0 0 0 -1 4194560 100 0 0 0 \
                     55 45 0 0 20 0 1 0 12345 1000 512 0 0 0 0 0 0 0 0 0 0 0 0";
-        let p = parse_proc_stat(1, line, 1.0, Arc::from("root"), &mut seen, &ctx(&pf)).unwrap();
+        let p = parse_proc_stat(
+            1,
+            line,
+            1.0,
+            Arc::from("root"),
+            &mut seen,
+            &mut HashMap::new(),
+            &ctx(&pf),
+        )
+        .unwrap();
         assert_eq!(p.cpu, 0.0);
         assert_eq!(seen.get(&1), Some(&100)); // 55 + 45 recorded for next time
+    }
+
+    /// A stat line with a chosen pid, name and start time.
+    fn stat_line(pid: i32, comm: &str, starttime: u64) -> String {
+        // Fields after the comm: state ppid pgrp session tty tpgid flags minflt
+        // cminflt majflt cmajflt utime stime cutime cstime prio nice threads
+        // itrealvalue starttime vsize rss ...
+        format!(
+            "{pid} ({comm}) S 1 0 0 0 -1 0 0 0 0 0 55 45 0 0 20 0 1 0 {starttime} 1000 512 \
+             0 0 0 0 0 0 0 0 0 0 0 0"
+        )
+    }
+
+    #[test]
+    fn a_reused_pid_does_not_inherit_the_old_name() {
+        // This is why the cache is keyed on the start time as well as the pid.
+        // Without it the interning is not an optimisation, it is a bug that
+        // reports one process under another's name.
+        let pf = ProcFs::new().unwrap();
+        let mut names = HashMap::new();
+        let mut seen = HashMap::new();
+
+        let first = stat_line(4242, "postgres", 111);
+        let a = parse_proc_stat(
+            4242,
+            &first,
+            1.0,
+            Arc::from("root"),
+            &mut seen,
+            &mut names,
+            &ctx(&pf),
+        )
+        .unwrap();
+        assert_eq!(a.name.as_ref(), "postgres");
+
+        // Same pid, different process.
+        let second = stat_line(4242, "nginx", 999);
+        let b = parse_proc_stat(
+            4242,
+            &second,
+            1.0,
+            Arc::from("root"),
+            &mut seen,
+            &mut names,
+            &ctx(&pf),
+        )
+        .unwrap();
+        assert_eq!(b.name.as_ref(), "nginx", "a recycled pid kept the old name");
+    }
+
+    #[test]
+    fn an_unchanged_process_shares_one_allocation() {
+        // The point of the change: the same process across samples must hand
+        // back the same `Arc`, not an equal string.
+        let pf = ProcFs::new().unwrap();
+        let mut names = HashMap::new();
+        let mut seen = HashMap::new();
+        let line = stat_line(7, "some-daemon", 555);
+
+        let a = parse_proc_stat(
+            7,
+            &line,
+            1.0,
+            Arc::from("root"),
+            &mut seen,
+            &mut names,
+            &ctx(&pf),
+        )
+        .unwrap();
+        let b = parse_proc_stat(
+            7,
+            &line,
+            1.0,
+            Arc::from("root"),
+            &mut seen,
+            &mut names,
+            &ctx(&pf),
+        )
+        .unwrap();
+        assert!(
+            Arc::ptr_eq(&a.name, &b.name),
+            "the name was reallocated for an unchanged process"
+        );
     }
 
     #[test]
@@ -591,7 +718,16 @@ mod tests {
         let mut seen = HashMap::new();
         let line = "7 (reused) S 0 0 0 0 -1 0 0 0 0 0 \
                     500000 1 0 0 20 0 1 0 1 1000 512 0 0 0 0 0 0 0 0 0 0 0 0";
-        let p = parse_proc_stat(7, line, 1.0, Arc::from("root"), &mut seen, &ctx(&pf)).unwrap();
+        let p = parse_proc_stat(
+            7,
+            line,
+            1.0,
+            Arc::from("root"),
+            &mut seen,
+            &mut HashMap::new(),
+            &ctx(&pf),
+        )
+        .unwrap();
         assert_eq!(p.cpu, 400.0, "must clamp to cores * 100");
     }
 
@@ -604,7 +740,16 @@ mod tests {
         // 100 total jiffies now, 50 before -> 50 jiffies in 1s at 100Hz = 50%
         let line = "1 (init) S 0 0 0 0 -1 4194560 100 0 0 0 \
                     55 45 0 0 20 0 1 0 12345 1000 512 0 0 0 0 0 0 0 0 0 0 0 0";
-        let p = parse_proc_stat(1, line, 1.0, Arc::from("root"), &mut seen, &ctx(&pf)).unwrap();
+        let p = parse_proc_stat(
+            1,
+            line,
+            1.0,
+            Arc::from("root"),
+            &mut seen,
+            &mut HashMap::new(),
+            &ctx(&pf),
+        )
+        .unwrap();
         assert!((p.cpu - 50.0).abs() < 0.01);
     }
 }

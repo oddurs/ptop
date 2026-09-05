@@ -749,7 +749,7 @@ fn draw_procs(f: &mut Frame, area: Rect, app: &App) {
             // full contrast.
             cells.push(Cell::from(Line::from(vec![
                 Span::styled(r.prefix.clone(), app.theme.chrome_style()),
-                Span::raw(p.name.clone()),
+                Span::raw(p.name.to_string()),
             ])));
             Row::new(cells).style(style)
         })

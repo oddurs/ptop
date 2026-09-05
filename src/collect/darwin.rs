@@ -6,13 +6,18 @@
 
 use super::{Collector, Needs};
 use crate::sample::{IoRates, MemStat, ProcSample, Sample};
+use std::collections::HashMap;
 use std::io;
+use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 use sysinfo::{ProcessesToUpdate, System, Users};
 
 pub struct SysinfoCollector {
     sys: System,
     users: Users,
+    /// pid -> (start time, name). Same key as the Linux collector, and for the
+    /// same reason: a recycled pid must not inherit the dead process's name.
+    names: HashMap<i32, (u64, Arc<str>)>,
 }
 
 impl SysinfoCollector {
@@ -20,6 +25,7 @@ impl SysinfoCollector {
         Ok(Self {
             sys: System::new_all(),
             users: Users::new_with_refreshed_list(),
+            names: HashMap::new(),
         })
     }
 }
@@ -37,39 +43,51 @@ impl Collector for SysinfoCollector {
             cpu_per_core.iter().sum::<f32>() / cpu_per_core.len() as f32
         };
 
-        let procs = self
-            .sys
+        let Self { sys, users, names } = self;
+        let procs = sys
             .processes()
             .iter()
-            .map(|(pid, p)| ProcSample {
-                pid: pid.as_u32() as i32,
-                // sysinfo reports no parent for processes this user does not
-                // own, so on macOS roughly a third of pids come back with 0 and
-                // the tree view shows them as roots. The /proc backend has real
-                // parentage for everything.
-                ppid: p.parent().map(|p| p.as_u32() as i32).unwrap_or(0),
-                name: p.name().to_string_lossy().into_owned(),
-                user: p
-                    .user_id()
-                    .and_then(|uid| self.users.get_user_by_id(uid))
-                    .map(|u| std::sync::Arc::from(u.name()))
-                    .unwrap_or_else(|| std::sync::Arc::from("?")),
-                cpu: p.cpu_usage(),
-                rss: p.memory(),
-                // sysinfo exposes tasks only on Linux, where we use the other
-                // backend anyway.
-                threads: 1,
-                state: status_char(p.status()),
-                // sysinfo already reports these as bytes since the last
-                // refresh, so unlike the /proc backend there is no counter to
-                // diff here.
-                io: needs.io.then(|| {
-                    let d = p.disk_usage();
-                    IoRates {
-                        read: d.read_bytes,
-                        write: d.written_bytes,
+            .map(|(pid, p)| {
+                let id = pid.as_u32() as i32;
+                let started = p.start_time();
+                let name = match names.get(&id) {
+                    Some((t, n)) if *t == started => n.clone(),
+                    _ => {
+                        let n: Arc<str> = Arc::from(p.name().to_string_lossy().as_ref());
+                        names.insert(id, (started, n.clone()));
+                        n
                     }
-                }),
+                };
+                ProcSample {
+                    pid: pid.as_u32() as i32,
+                    // sysinfo reports no parent for processes this user does not
+                    // own, so on macOS roughly a third of pids come back with 0 and
+                    // the tree view shows them as roots. The /proc backend has real
+                    // parentage for everything.
+                    ppid: p.parent().map(|p| p.as_u32() as i32).unwrap_or(0),
+                    name,
+                    user: p
+                        .user_id()
+                        .and_then(|uid| users.get_user_by_id(uid))
+                        .map(|u| std::sync::Arc::from(u.name()))
+                        .unwrap_or_else(|| std::sync::Arc::from("?")),
+                    cpu: p.cpu_usage(),
+                    rss: p.memory(),
+                    // sysinfo exposes tasks only on Linux, where we use the other
+                    // backend anyway.
+                    threads: 1,
+                    state: status_char(p.status()),
+                    // sysinfo already reports these as bytes since the last
+                    // refresh, so unlike the /proc backend there is no counter to
+                    // diff here.
+                    io: needs.io.then(|| {
+                        let d = p.disk_usage();
+                        IoRates {
+                            read: d.read_bytes,
+                            write: d.written_bytes,
+                        }
+                    }),
+                }
             })
             .collect();
 

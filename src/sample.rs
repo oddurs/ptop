@@ -51,7 +51,11 @@ pub struct ProcSample {
     /// Retained for the process-tree view; nothing reads it yet.
     #[allow(dead_code)]
     pub ppid: i32,
-    pub name: String,
+    /// Shared, like `user`. A process name is re-read every sample and almost
+    /// never changes; at 400 processes over a 600-sample buffer, allocating it
+    /// afresh each time cost 240,000 allocations and 3.8 MB for strings that
+    /// were all identical.
+    pub name: Arc<str>,
     /// Shared: a few distinct users repeat across every process in every
     /// retained sample, so the ring buffer holds one allocation each, not one
     /// per row per second.
