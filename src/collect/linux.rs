@@ -7,8 +7,11 @@
 use super::{Collector, Needs};
 use crate::sample::{IoRates, MemStat, ProcSample, Sample};
 use std::collections::HashMap;
+use std::fmt::Write as _;
 use std::fs;
+use std::fs::File;
 use std::io;
+use std::io::Read as _;
 use std::os::unix::fs::MetadataExt;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
@@ -64,6 +67,10 @@ pub struct ProcFs {
     prev_at: Option<SystemTime>,
     /// uid -> username, parsed once from /etc/passwd.
     users: HashMap<u32, Arc<str>>,
+    /// Reused across every file read, so a sample allocates no buffers.
+    buf: Vec<u8>,
+    /// Reused path, so `/proc/<pid>/stat` costs no allocation either.
+    path: String,
     ticks_per_sec: f64,
     page_size: u64,
 }
@@ -77,6 +84,8 @@ impl ProcFs {
             prev_proc_io: HashMap::new(),
             prev_at: None,
             users: parse_passwd(),
+            buf: vec![0; READ_BUF],
+            path: String::with_capacity(32),
             // USER_HZ is fixed at 100 on effectively every Linux build. The
             // honest way is sysconf(_SC_CLK_TCK), but that needs libc, and the
             // point of this backend is to need nothing.
@@ -86,7 +95,13 @@ impl ProcFs {
     }
 
     fn read_cpu(&mut self) -> io::Result<(f32, Vec<f32>)> {
-        let stat = fs::read_to_string("/proc/stat")?;
+        let Self {
+            buf,
+            prev_total,
+            prev_cores,
+            ..
+        } = self;
+        let stat = read_into("/proc/stat", buf)?;
         let mut total_now = CpuTimes::default();
         let mut cores_now = Vec::new();
 
@@ -111,26 +126,26 @@ impl ProcFs {
             }
         }
 
-        let total_pct = match self.prev_total {
+        let total_pct = match *prev_total {
             Some(prev) => total_now.busy_pct_since(&prev),
             None => 0.0,
         };
         let core_pcts = cores_now
             .iter()
             .enumerate()
-            .map(|(i, now)| match self.prev_cores.get(i) {
+            .map(|(i, now)| match prev_cores.get(i) {
                 Some(prev) => now.busy_pct_since(prev),
                 None => 0.0,
             })
             .collect();
 
-        self.prev_total = Some(total_now);
-        self.prev_cores = cores_now;
+        *prev_total = Some(total_now);
+        *prev_cores = cores_now;
         Ok((total_pct, core_pcts))
     }
 
-    fn read_mem(&self) -> io::Result<MemStat> {
-        let text = fs::read_to_string("/proc/meminfo")?;
+    fn read_mem(&mut self) -> io::Result<MemStat> {
+        let text = read_into("/proc/meminfo", &mut self.buf)?;
         let get = |key: &str| -> u64 {
             text.lines()
                 .find_map(|l| {
@@ -158,8 +173,8 @@ impl ProcFs {
         })
     }
 
-    fn read_load(&self) -> io::Result<[f64; 3]> {
-        let text = fs::read_to_string("/proc/loadavg")?;
+    fn read_load(&mut self) -> io::Result<[f64; 3]> {
+        let text = read_into("/proc/loadavg", &mut self.buf)?;
         let mut it = text.split_whitespace();
         let mut out = [0.0; 3];
         for slot in out.iter_mut() {
@@ -168,8 +183,8 @@ impl ProcFs {
         Ok(out)
     }
 
-    fn read_uptime(&self) -> io::Result<Duration> {
-        let text = fs::read_to_string("/proc/uptime")?;
+    fn read_uptime(&mut self) -> io::Result<Duration> {
+        let text = read_into("/proc/uptime", &mut self.buf)?;
         let secs: f64 = text
             .split_whitespace()
             .next()
@@ -184,6 +199,28 @@ impl ProcFs {
         needs: Needs,
         denied: &mut usize,
     ) -> io::Result<Vec<ProcSample>> {
+        // Destructured so the shared read buffer, the path buffer and the
+        // previous-sample maps are all borrowed disjointly. Going through
+        // `&mut self` would hold the whole collector for as long as the text
+        // read out of the buffer lives.
+        let Self {
+            buf,
+            path,
+            prev_proc_jiffies,
+            prev_proc_io,
+            users,
+            ticks_per_sec,
+            page_size,
+            prev_cores,
+            ..
+        } = self;
+        let ctx = StatCtx {
+            prev_jiffies: prev_proc_jiffies,
+            ticks_per_sec: *ticks_per_sec,
+            page_size: *page_size,
+            cores: prev_cores.len().max(1),
+        };
+
         let mut out = Vec::new();
         let mut seen = HashMap::new();
         let mut seen_io = HashMap::new();
@@ -198,24 +235,29 @@ impl ProcFs {
             };
 
             // Processes exit while we walk the directory; a vanished pid is
-            // normal, not an error worth surfacing.
-            let Ok(stat) = fs::read_to_string(format!("/proc/{pid}/stat")) else {
+            // normal, not an error worth surfacing. Read first, so an exited
+            // process costs one failed open and nothing else — putting the uid
+            // stat above this made every dead pid pay for a statx too.
+            path.clear();
+            let _ = write!(path, "/proc/{pid}/stat");
+            let Ok(stat) = read_into(path, buf) else {
                 continue;
             };
 
             // The /proc/<pid> directory is owned by the process's uid, so one
-            // stat answers what parsing /proc/<pid>/status also would — and
-            // measurably cheaper: reading that file for every process every
-            // second was 58% of total collection time.
+            // stat answers what parsing /proc/<pid>/status also would.
             let uid = entry.metadata().map(|m| m.uid()).unwrap_or(0);
-            let user = self.user_for_uid(uid);
+            let user = users
+                .entry(uid)
+                .or_insert_with(|| Arc::from(uid.to_string().as_str()))
+                .clone();
 
-            let Some(mut p) = self.parse_proc_stat(pid, &stat, elapsed_secs, user, &mut seen)
+            let Some(mut p) = parse_proc_stat(pid, stat, elapsed_secs, user, &mut seen, &ctx)
             else {
                 continue;
             };
             if needs.io {
-                match self.read_proc_io(pid, elapsed_secs, &mut seen_io) {
+                match read_proc_io(pid, elapsed_secs, &mut seen_io, prev_proc_io, path, buf) {
                     Ok(rates) => p.io = rates,
                     Err(()) => *denied += 1,
                 }
@@ -223,115 +265,156 @@ impl ProcFs {
             out.push(p);
         }
 
-        // Drop counters for processes that have exited, or the map grows
+        // Drop counters for processes that have exited, or the maps grow
         // without bound on a busy box.
-        self.prev_proc_jiffies = seen;
+        *prev_proc_jiffies = seen;
         if needs.io {
-            self.prev_proc_io = seen_io;
+            *prev_proc_io = seen_io;
         }
         Ok(out)
     }
+}
 
-    /// Per-process disk throughput from `/proc/<pid>/io`.
-    ///
-    /// That file is mode 0400 and owned by the process owner, so reading
-    /// another user's process needs CAP_SYS_PTRACE. Unreadable means `None`,
-    /// never zero — showing every process you do not own as idle would be a
-    /// confident lie, where a blank is merely an absence.
-    /// `Err(())` means the file could not be read — running as root would fix
-    /// it. `Ok(None)` means the process is simply too new to have a previous
-    /// counter to diff against, which fixes itself on the next sample. Both
-    /// render as a dash, but only one of them is worth advising the user about.
-    fn read_proc_io(
-        &self,
-        pid: i32,
-        elapsed_secs: f64,
-        seen: &mut HashMap<i32, (u64, u64)>,
-    ) -> Result<Option<IoRates>, ()> {
-        let text = fs::read_to_string(format!("/proc/{pid}/io")).map_err(|_| ())?;
-        let (read, write) = parse_proc_io(&text).ok_or(())?;
-        seen.insert(pid, (read, write));
+/// Per-process disk throughput from `/proc/<pid>/io`.
+///
+/// That file is mode 0400 and owned by the process owner, so reading another
+/// user's process needs CAP_SYS_PTRACE. Unreadable means no figure, never zero
+/// — showing every process you do not own as idle would be a confident lie,
+/// where a blank is merely an absence.
+///
+/// `Err(())` means the file could not be read — running as root would fix it.
+/// `Ok(None)` means the process is too new to have a previous counter to diff
+/// against, which fixes itself on the next sample. Both render as a dash, but
+/// only one is worth advising the user about.
+fn read_proc_io(
+    pid: i32,
+    elapsed_secs: f64,
+    seen: &mut HashMap<i32, (u64, u64)>,
+    prev: &HashMap<i32, (u64, u64)>,
+    path: &mut String,
+    buf: &mut Vec<u8>,
+) -> Result<Option<IoRates>, ()> {
+    path.clear();
+    let _ = write!(path, "/proc/{pid}/io");
+    let text = read_into(path, buf).map_err(|_| ())?;
+    let (read, write) = parse_proc_io(text).ok_or(())?;
+    seen.insert(pid, (read, write));
 
-        // Cumulative counters again: only the delta is a rate.
-        let Some((prev_r, prev_w)) = self.prev_proc_io.get(&pid).copied() else {
-            return Ok(None);
-        };
-        if elapsed_secs <= 0.0 {
-            return Ok(None);
+    let Some((prev_r, prev_w)) = prev.get(&pid).copied() else {
+        return Ok(None);
+    };
+    if elapsed_secs <= 0.0 {
+        return Ok(None);
+    }
+    Ok(Some(IoRates {
+        read: ((read.saturating_sub(prev_r)) as f64 / elapsed_secs) as u64,
+        write: ((write.saturating_sub(prev_w)) as f64 / elapsed_secs) as u64,
+    }))
+}
+
+/// Turn one `/proc/<pid>/stat` line into a sample.
+fn parse_proc_stat(
+    pid: i32,
+    stat: &str,
+    elapsed_secs: f64,
+    user: Arc<str>,
+    seen: &mut HashMap<i32, u64>,
+    ctx: &StatCtx,
+) -> Option<ProcSample> {
+    // Field 2 is the executable name in parentheses, and it may contain spaces
+    // *and* parentheses, so splitting on whitespace corrupts every field after
+    // it. Split on the last ')' instead.
+    let close = stat.rfind(')')?;
+    let open = stat.find('(')?;
+    let comm = stat.get(open + 1..close)?.to_string();
+    let rest: Vec<&str> = stat.get(close + 1..)?.split_whitespace().collect();
+
+    // rest[0] is field 3 (state), so field N lives at rest[N - 3].
+    let state = rest.first()?.chars().next().unwrap_or('?');
+    let ppid: i32 = rest.get(1)?.parse().ok()?;
+    let utime: u64 = rest.get(11)?.parse().ok()?;
+    let stime: u64 = rest.get(12)?.parse().ok()?;
+    let threads: u32 = rest.get(17)?.parse().unwrap_or(1);
+    let rss_pages: u64 = rest.get(21)?.parse().unwrap_or(0);
+
+    let jiffies = utime + stime;
+    seen.insert(pid, jiffies);
+
+    // Same story as the aggregate CPU: only the delta means anything.
+    let cpu = match ctx.prev_jiffies.get(&pid) {
+        Some(&prev) if elapsed_secs > 0.0 => {
+            let dj = jiffies.saturating_sub(prev) as f64;
+            let pct = ((dj / ctx.ticks_per_sec / elapsed_secs) * 100.0) as f32;
+            // Clamp to the total the machine can actually deliver. A pid reused
+            // between samples diffs the new process against the old one's
+            // counter and can otherwise report thousands of percent. htop
+            // guards the same way.
+            pct.min(ctx.cores as f32 * 100.0)
         }
-        Ok(Some(IoRates {
-            read: ((read.saturating_sub(prev_r)) as f64 / elapsed_secs) as u64,
-            write: ((write.saturating_sub(prev_w)) as f64 / elapsed_secs) as u64,
-        }))
+        _ => 0.0,
+    };
+
+    Some(ProcSample {
+        pid,
+        ppid,
+        name: comm,
+        user,
+        cpu,
+        rss: rss_pages * ctx.page_size,
+        threads,
+        state,
+        io: None,
+    })
+}
+
+/// The collector state a stat line needs to become a `ProcSample`.
+///
+/// Passed explicitly rather than through `&self` so the shared read buffer can
+/// be borrowed mutably at the same time.
+struct StatCtx<'a> {
+    prev_jiffies: &'a HashMap<i32, u64>,
+    ticks_per_sec: f64,
+    page_size: u64,
+    cores: usize,
+}
+
+/// Starting size of the shared read buffer.
+///
+/// A floor, not a cap: the buffer ratchets up to the largest `/proc` file seen
+/// and never shrinks, so on a many-core machine `/proc/stat` alone will push it
+/// past this on the first sample and every later read carries the larger
+/// allocation. That is bounded by the largest file ptop reads — a few
+/// kilobytes — and is the price of never reallocating during a sample.
+const READ_BUF: usize = 8192;
+
+/// Read a file into `buf` and return it as text.
+///
+/// `File::open` + `read` rather than `fs::read_to_string`, which calls
+/// `metadata()` to size its buffer. `/proc` reports every file as zero bytes,
+/// so that `statx` is pure waste — and because the size comes back as zero the
+/// buffer then grows a page at a time, which is where 8.5 reads per process
+/// came from. htop does the same thing with `openat` on a cached directory fd
+/// and one `read` into a fixed buffer.
+fn read_into<'b>(path: &str, buf: &'b mut Vec<u8>) -> io::Result<&'b str> {
+    let mut f = File::open(path)?;
+    if buf.len() < READ_BUF {
+        buf.resize(READ_BUF, 0);
     }
-
-    fn user_for_uid(&mut self, uid: u32) -> Arc<str> {
-        // Unknown uids (containers, LDAP, no /etc/passwd entry) get memoised in
-        // numeric form so the fallback allocates once, not once per sample.
-        self.users
-            .entry(uid)
-            .or_insert_with(|| Arc::from(uid.to_string().as_str()))
-            .clone()
+    let mut n = 0;
+    loop {
+        if n == buf.len() {
+            // Only for a file larger than anything /proc is expected to serve.
+            buf.resize(buf.len() * 2, 0);
+        }
+        match f.read(&mut buf[n..]) {
+            Ok(0) => break,
+            Ok(k) => n += k,
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+            Err(e) => return Err(e),
+        }
     }
-
-    fn parse_proc_stat(
-        &self,
-        pid: i32,
-        stat: &str,
-        elapsed_secs: f64,
-        user: Arc<str>,
-        seen: &mut HashMap<i32, u64>,
-    ) -> Option<ProcSample> {
-        // Field 2 is the executable name in parentheses, and it may contain
-        // spaces *and* parentheses, so splitting on whitespace corrupts every
-        // field after it. Split on the last ')' instead.
-        let close = stat.rfind(')')?;
-        let open = stat.find('(')?;
-        let comm = stat.get(open + 1..close)?.to_string();
-        let rest: Vec<&str> = stat.get(close + 1..)?.split_whitespace().collect();
-
-        // rest[0] is field 3 (state), so field N lives at rest[N - 3].
-        let state = rest.first()?.chars().next().unwrap_or('?');
-        let ppid: i32 = rest.get(1)?.parse().ok()?;
-        let utime: u64 = rest.get(11)?.parse().ok()?;
-        let stime: u64 = rest.get(12)?.parse().ok()?;
-        let threads: u32 = rest.get(17)?.parse().unwrap_or(1);
-        let rss_pages: u64 = rest.get(21)?.parse().unwrap_or(0);
-
-        let jiffies = utime + stime;
-        seen.insert(pid, jiffies);
-
-        // Same story as the aggregate CPU: only the delta means anything.
-        let cpu = match self.prev_proc_jiffies.get(&pid) {
-            Some(&prev) if elapsed_secs > 0.0 => {
-                let dj = jiffies.saturating_sub(prev) as f64;
-                let pct = ((dj / self.ticks_per_sec / elapsed_secs) * 100.0) as f32;
-                // Clamp to the total the machine can actually deliver. A pid
-                // reused between samples diffs the new process against the old
-                // one's counter and can otherwise report thousands of percent.
-                // htop guards the same way.
-                pct.min(self.core_count() as f32 * 100.0)
-            }
-            _ => 0.0,
-        };
-
-        Some(ProcSample {
-            pid,
-            ppid,
-            name: comm,
-            user,
-            cpu,
-            rss: rss_pages * self.page_size,
-            threads,
-            state,
-            io: None,
-        })
-    }
-
-    /// Cores seen in the last /proc/stat read; 1 before the first read.
-    fn core_count(&self) -> usize {
-        self.prev_cores.len().max(1)
-    }
+    std::str::from_utf8(&buf[..n])
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "not utf-8"))
 }
 
 /// Cumulative block-layer bytes from `/proc/<pid>/io`.
@@ -400,6 +483,17 @@ impl Collector for ProcFs {
 mod tests {
     use super::*;
 
+    /// Build a parse context from a collector, so the tests exercise the same
+    /// state the collector would hand the parser.
+    fn ctx(pf: &ProcFs) -> StatCtx<'_> {
+        StatCtx {
+            prev_jiffies: &pf.prev_proc_jiffies,
+            ticks_per_sec: pf.ticks_per_sec,
+            page_size: pf.page_size,
+            cores: pf.prev_cores.len().max(1),
+        }
+    }
+
     #[test]
     fn cpu_times_skips_guest_double_count() {
         // user nice system idle iowait irq softirq steal guest guest_nice
@@ -439,9 +533,7 @@ mod tests {
         // naive whitespace splitting.
         let line = "1234 ((evil) proc)) S 1 0 0 0 -1 4194560 100 0 0 0 \
                     55 45 0 0 20 0 8 0 12345 1000 512 0 0 0 0 0 0 0 0 0 0 0 0";
-        let p = pf
-            .parse_proc_stat(1234, line, 1.0, Arc::from("root"), &mut seen)
-            .unwrap();
+        let p = parse_proc_stat(1234, line, 1.0, Arc::from("root"), &mut seen, &ctx(&pf)).unwrap();
         assert_eq!(p.name, "(evil) proc)");
         assert_eq!(p.ppid, 1);
         assert_eq!(p.threads, 8);
@@ -454,9 +546,7 @@ mod tests {
         let mut seen = HashMap::new();
         let line = "1 (init) S 0 0 0 0 -1 4194560 100 0 0 0 \
                     55 45 0 0 20 0 1 0 12345 1000 512 0 0 0 0 0 0 0 0 0 0 0 0";
-        let p = pf
-            .parse_proc_stat(1, line, 1.0, Arc::from("root"), &mut seen)
-            .unwrap();
+        let p = parse_proc_stat(1, line, 1.0, Arc::from("root"), &mut seen, &ctx(&pf)).unwrap();
         assert_eq!(p.cpu, 0.0);
         assert_eq!(seen.get(&1), Some(&100)); // 55 + 45 recorded for next time
     }
@@ -478,7 +568,17 @@ mod tests {
         let pf = ProcFs::new().unwrap();
         let mut seen = HashMap::new();
         // A pid that cannot be read is Err — the case root would fix.
-        assert!(pf.read_proc_io(-1, 1.0, &mut seen).is_err());
+        assert!(
+            read_proc_io(
+                -1,
+                1.0,
+                &mut seen,
+                &pf.prev_proc_io,
+                &mut String::new(),
+                &mut Vec::new()
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -491,9 +591,7 @@ mod tests {
         let mut seen = HashMap::new();
         let line = "7 (reused) S 0 0 0 0 -1 0 0 0 0 0 \
                     500000 1 0 0 20 0 1 0 1 1000 512 0 0 0 0 0 0 0 0 0 0 0 0";
-        let p = pf
-            .parse_proc_stat(7, line, 1.0, Arc::from("root"), &mut seen)
-            .unwrap();
+        let p = parse_proc_stat(7, line, 1.0, Arc::from("root"), &mut seen, &ctx(&pf)).unwrap();
         assert_eq!(p.cpu, 400.0, "must clamp to cores * 100");
     }
 
@@ -506,9 +604,7 @@ mod tests {
         // 100 total jiffies now, 50 before -> 50 jiffies in 1s at 100Hz = 50%
         let line = "1 (init) S 0 0 0 0 -1 4194560 100 0 0 0 \
                     55 45 0 0 20 0 1 0 12345 1000 512 0 0 0 0 0 0 0 0 0 0 0 0";
-        let p = pf
-            .parse_proc_stat(1, line, 1.0, Arc::from("root"), &mut seen)
-            .unwrap();
+        let p = parse_proc_stat(1, line, 1.0, Arc::from("root"), &mut seen, &ctx(&pf)).unwrap();
         assert!((p.cpu - 50.0).abs() < 0.01);
     }
 }

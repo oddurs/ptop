@@ -31,7 +31,7 @@ structs plus 3.8 MB of process names, with `ProcSample` at 96 bytes.
 
 ---
 
-## E1 — Read `/proc` into a reused buffer  ·  `M`
+## E1 — Read `/proc` into a reused buffer  ·  `M`  ·  **DONE**
 
 **What.** Replace `fs::read_to_string(format!("/proc/{pid}/stat"))` with an
 `openat` relative to a cached directory fd, one `read` into a buffer owned by
@@ -51,6 +51,22 @@ equivalent. Neither calls `stat` to size anything.
 uid `fstat`, which is genuinely needed). `read` calls approach one per file
 opened. `--bench` improves and the number is recorded here. No behaviour change:
 the existing `/proc` parsing tests are untouched and still pass.
+
+**Result.** Measured the same way, at 304 processes:
+
+| syscall | before | after |
+| --- | --- | --- |
+| `read` | 2574 | **966** |
+| `statx` | 802 | **319** |
+| `openat` | 484 | 484 |
+
+`statx` is now one per process — the uid `fstat`, which is genuinely needed —
+and `read` is two per file: the data, then the zero-length read that proves
+EOF. Both are the floor for this approach without `openat` on a directory fd,
+which Rust's standard library does not expose.
+
+Wall clock at 400 processes: **1.44 ms → 1.12 ms** with IO off, 2.28 → 1.67 with
+it on.
 
 **Touches.** `src/collect/linux.rs`
 
