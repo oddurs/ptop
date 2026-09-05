@@ -170,7 +170,7 @@ mod tests {
         ProcSample {
             pid,
             ppid,
-            name: name.into(),
+            name: std::sync::Arc::from(name),
             user: Arc::from("root"),
             cpu,
             rss: 1024,
@@ -274,7 +274,7 @@ mod tests {
         let procs = vec![p(1, 2, "a", 0.0), p(2, 1, "b", 0.0), p(3, 1, "target", 0.0)];
         let matched = HashSet::from([3]);
         let rows = build(&procs, Sort::Pid, Some(&matched));
-        assert!(rows.iter().any(|r| r.proc.name == "target"));
+        assert!(rows.iter().any(|r| r.proc.name.as_ref() == "target"));
     }
 
     #[test]

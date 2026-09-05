@@ -15,7 +15,7 @@ fn proc_named(pid: i32, name: &str, cpu: f32, rss: u64) -> ProcSample {
     ProcSample {
         pid,
         ppid: 1,
-        name: name.into(),
+        name: std::sync::Arc::from(name),
         user: std::sync::Arc::from("root"),
         cpu,
         rss,
@@ -130,7 +130,7 @@ fn sort_by_mem_puts_the_biggest_process_first() {
     let names: Vec<&str> = app
         .visible_rows()
         .iter()
-        .map(|r| r.proc.name.as_str())
+        .map(|r| r.proc.name.as_ref())
         .collect();
     assert_eq!(names, vec!["postgres", "nginx", "init"]);
 }

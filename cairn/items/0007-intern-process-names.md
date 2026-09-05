@@ -2,7 +2,7 @@
 id: 7
 title: Intern process names
 type: feature
-status: backlog
+status: done
 milestone: v0.2
 created: 2026-09-05
 updated: 2026-09-05

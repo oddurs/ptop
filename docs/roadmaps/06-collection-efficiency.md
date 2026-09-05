@@ -72,7 +72,7 @@ it on.
 
 ---
 
-## E2 — Intern process names  ·  `S`
+## E2 — Intern process names  ·  `S`  ·  **DONE**
 
 **What.** Hold `ProcSample::name` as `Arc<str>`, cached per pid and refreshed
 only when the pid is new to the collector.
@@ -97,6 +97,18 @@ optimisation.
 *new* process. Retained memory falls by roughly the 3.8 MB above. A pid reused
 within the buffer window does not inherit the previous process's name — tested
 directly, since that is the failure mode this introduces.
+
+**Result.** `ProcSample::name` is `Arc<str>`, cached per pid and refreshed only
+when the start time changes. A sample now allocates a name once per *new*
+process rather than once per process, and the retained buffer drops the 3.8 MB
+of duplicate names.
+
+The pid-reuse guard is the load-bearing part and has its own test: the same pid
+with a different start time must produce a different name, and an unchanged
+process must hand back the *same* `Arc`, not an equal string.
+
+Wall clock at 400 processes: 1.12 ms → **1.06 ms**. Small, as expected — this
+was always about allocations and retained memory rather than time.
 
 **Touches.** `src/sample.rs`, `src/collect/linux.rs`, `src/collect/darwin.rs`
 

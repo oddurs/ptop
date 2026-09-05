@@ -22,13 +22,12 @@ Timeline, scrubbing, process tree, colour that survives a colourblind reader and
 
 ## v0.2 — Cheap enough to run
 
-`##········` 20% · 1 of 5 done · due 2026-11-01
+`####······` 40% · 2 of 5 done · due 2026-11-01
 
 Collector fast enough for sub-second sampling, and the data-fidelity gaps against atop closed or disclosed.
 
 ### backlog
 
-- [ ] `0007` Intern process names <sup>feature · p1</sup>
 - [ ] `0011` Capture processes that live and die between samples <sup>feature · p0</sup>
 - [ ] `0012` Mark sampling gaps in the timeline <sup>feature · p2</sup>
 - [ ] `0013` Configurable sample interval and window <sup>feature · p2</sup>
@@ -36,6 +35,7 @@ Collector fast enough for sub-second sampling, and the data-fidelity gaps agains
 ### done
 
 - [x] `0006` Read /proc into a reused buffer <sup>feature · p1</sup>
+- [x] `0007` Intern process names <sup>feature · p1</sup>
 
 ## v1.0 — Yours to configure
 
