@@ -32,7 +32,12 @@ pub enum Tier {
     /// 256-colour cube. The first tier where ptop actually controls the hues.
     Ansi256,
     #[default]
-    /// 24-bit. Same palette as 256, at full precision.
+    /// 24-bit.
+    ///
+    /// Not simply "256 at full precision": the indexed palette is searched
+    /// within the cube under its own contrast and separation constraints, so
+    /// its slots sit some distance from their true-colour counterparts. Same
+    /// design intent, independently solved for each tier.
     TrueColor,
 }
 
@@ -180,15 +185,26 @@ impl Theme {
         }
     }
 
-    /// Colour-vision-safe, quantised onto the xterm 256 cube.
+    /// Colour-vision-safe on the xterm 256 palette.
+    ///
+    /// Not a per-channel quantisation of the true-colour values. Rounding each
+    /// channel to the nearest cube level independently is not perceptually
+    /// safe: it collapsed `series_cpu` and `series_mem` from ΔE 12.8 to **6.7**
+    /// — below the target — because both landed on neighbouring cube cells.
+    /// These indices were instead searched for directly, maximising the worst
+    /// pair subject to staying near the intended hue and clearing 3:1 contrast
+    /// against **both** the surface and the selected-row background — a first
+    /// attempt satisfied only the surface and put `series_cpu` at 2.03:1 on a
+    /// selected row, which is invisible. Both figures are enforced below rather
+    /// than quoted here, because a number in a comment is not a guarantee.
     const fn safe_indexed() -> Self {
         Self {
             tier: Tier::Ansi256,
             ok: Color::Indexed(80),
             warn: Color::Indexed(222),
             critical: Color::Indexed(203),
-            series_cpu: Color::Indexed(104),
-            series_mem: Color::Indexed(139),
+            series_cpu: Color::Indexed(67),
+            series_mem: Color::Indexed(135),
             chrome: Color::Indexed(239),
             text: Color::Indexed(252),
             text_dim: Color::Indexed(244),
@@ -644,6 +660,106 @@ mod tests {
         // A dumb or absent terminal gets no colour.
         assert_eq!(Tier::detect_from(false, None, Some("dumb")), Mono);
         assert_eq!(Tier::detect_from(false, None, None), Mono);
+    }
+
+    /// The five colours that carry meaning, in a fixed order.
+    fn meaning_bearing(t: &Theme) -> [(&'static str, Color); 5] {
+        [
+            ("ok", t.ok),
+            ("warn", t.warn),
+            ("critical", t.critical),
+            ("series_cpu", t.series_cpu),
+            ("series_mem", t.series_mem),
+        ]
+    }
+
+    #[test]
+    fn the_safe_palette_meets_its_separation_target() {
+        // This is the claim in `safe_truecolor`'s doc comment, enforced. A hex
+        // nudged by eye now fails the build rather than a reviewer's judgement.
+        use crate::cvd::{CVD_TARGET, to_rgb, worst_cvd};
+        for tier in [Tier::Ansi256, Tier::TrueColor] {
+            let th = Theme::new(Palette::Safe, tier);
+            let cols = meaning_bearing(&th);
+            let mut worst = (f64::INFINITY, "", "");
+            for (i, (an, a)) in cols.iter().enumerate() {
+                for (bn, b) in &cols[i + 1..] {
+                    let (ra, rb) = (to_rgb(*a).unwrap(), to_rgb(*b).unwrap());
+                    let d = worst_cvd(ra, rb);
+                    if d < worst.0 {
+                        worst = (d, an, bn);
+                    }
+                }
+            }
+            assert!(
+                worst.0 >= CVD_TARGET,
+                "{tier:?}: worst pair {} <-> {} is dE {:.1}, below the target of {CVD_TARGET}",
+                worst.1,
+                worst.2,
+                worst.0
+            );
+        }
+    }
+
+    #[test]
+    fn the_safe_palette_is_legible_on_every_background_it_is_drawn_over() {
+        // Separation between hues says nothing about whether a hue is visible
+        // at all. The first 256-colour attempt cleared ΔE comfortably while
+        // sitting at 2.03:1 on the selected row.
+        use crate::cvd::{contrast, to_rgb};
+        const MIN_CONTRAST: f64 = 3.0;
+        for tier in [Tier::Ansi256, Tier::TrueColor] {
+            let th = Theme::new(Palette::Safe, tier);
+            let surface = [0x1a, 0x1a, 0x19];
+            let selected = to_rgb(th.selection_bg).unwrap();
+            for (name, c) in meaning_bearing(&th) {
+                let rgb = to_rgb(c).unwrap();
+                for (bg_name, bg) in [("surface", surface), ("selected row", selected)] {
+                    let r = contrast(rgb, bg);
+                    assert!(
+                        r >= MIN_CONTRAST,
+                        "{tier:?}: {name} is {r:.2}:1 against the {bg_name}, below {MIN_CONTRAST}:1"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_classic_palette_is_knowingly_below_the_target() {
+        // Not a bug: classic exists to restore the convention, and the whole
+        // reason `safe` is the default is that this pair is indistinguishable.
+        // Pinned so that "improving" classic is a deliberate act, not a
+        // silent one that removes the argument for the default.
+        use crate::cvd::{CVD_TARGET, Cvd, delta_e, to_rgb};
+        let th = Theme::new(Palette::Classic, Tier::TrueColor);
+        let d = delta_e(
+            to_rgb(th.ok).unwrap(),
+            to_rgb(th.warn).unwrap(),
+            Some(Cvd::Protan),
+        );
+        assert!(
+            d < CVD_TARGET,
+            "classic ok<->warn is dE {d:.1}; if this now passes, the case for \
+             `safe` being the default has changed and the docs need revisiting"
+        );
+    }
+
+    #[test]
+    fn the_ansi16_tier_is_unmeasurable_by_construction() {
+        // Stated rather than skipped: the user's terminal theme picks these,
+        // so there is no value to check. It is why the richer tiers exist.
+        use crate::cvd::to_rgb;
+        for palette in [Palette::Safe, Palette::Classic] {
+            let th = Theme::new(palette, Tier::Ansi16);
+            for (name, c) in meaning_bearing(&th) {
+                assert_eq!(
+                    to_rgb(c),
+                    None,
+                    "{palette:?} ansi16 {name} claims a measurable value"
+                );
+            }
+        }
     }
 
     #[test]

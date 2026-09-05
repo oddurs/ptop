@@ -133,6 +133,19 @@ protanopia, against a target of 8. The shipped palette's worst pair among its
 five meaning-bearing hues is **10.3**. `--theme=classic` restores
 green/yellow/red for anyone who wants the convention back.
 
+Both figures are **enforced in CI**, not asserted in prose: `src/cvd.rs`
+implements the same Machado 2009 simulation and OKLab conversion the palette was
+measured with, and a test fails the build if any pair among the five
+meaning-bearing hues drops below ΔE 8. A second test enforces the contrast
+floor, because separation between hues says nothing about whether a hue is
+visible at all.
+
+Both have already earned their place. The first caught the 256-colour tier
+shipping `series_cpu` and `series_mem` only 6.7 apart, because rounding each
+channel to its nearest cube level independently is not perceptually safe. The
+replacement then failed the second, sitting at 2.03:1 against the selected-row
+background — separated, and invisible.
+
 `--glyphs=braille|block|ascii` picks how the timeline is drawn. Braille packs
 two samples into every character cell and stacks cells vertically for twelve
 distinct heights; `block` needs less font support; `ascii` needs none. A Linux
