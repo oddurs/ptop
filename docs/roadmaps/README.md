@@ -1,3 +1,16 @@
+# Roadmaps — design rationale
+
+> **Live tracking moved to [cairn](../../cairn/items/).** These files are the
+> reasoning: the measurements, the prior-art comparisons, and the arguments that
+> produced each decision. They are worth keeping and worth reading, and they are
+> no longer where you look to see what is open.
+>
+> `cairn board` for the current state, `cairn next` for what is ready, or
+> [ROADMAP.md](../../ROADMAP.md) rendered from the same files.
+>
+> Items marked **DONE** below are shipped. Everything still open was moved into
+> cairn rather than duplicated — two lists of open work is worse than one.
+
 # Roadmaps
 
 Granular, individually shippable items derived from reading the prior art

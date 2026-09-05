@@ -265,7 +265,10 @@ own, so about a third of pids arrive with `ppid = 0` and appear as roots. The
 
 ## Roadmap
 
-Granular, evidence-backed items live in [`docs/roadmaps/`](docs/roadmaps/),
+Open work is tracked in-repo with [cairn](https://github.com/oddurs/cairn) —
+see [ROADMAP.md](ROADMAP.md), or `cairn board` in a checkout.
+
+The reasoning behind each decision lives in [`docs/roadmaps/`](docs/roadmaps/),
 derived from reading the prior art (htop, btop, bottom, zenith, atop) and
 auditing this UI against data-visualisation practice. Start with
 [the index](docs/roadmaps/README.md).
