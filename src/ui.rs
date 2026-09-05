@@ -15,13 +15,26 @@ use std::time::Duration;
 /// Eighth-block glyphs, used to draw the timeline one cell per sample.
 const BARS: [char; 8] = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
 
+/// Panel heights. Named so tests can locate a panel from the same numbers the
+/// renderer lays out with, rather than re-deriving them from a comment that
+/// silently goes stale.
+pub const HEADER_H: u16 = 3;
+pub const CORES_H: u16 = 3;
+pub const TIMELINE_H: u16 = 10;
+
+/// Rows occupied by the timeline panel, borders included.
+pub fn timeline_rows_range() -> std::ops::Range<u16> {
+    let top = HEADER_H + CORES_H;
+    top..top + TIMELINE_H
+}
+
 pub fn draw(f: &mut Frame, app: &App) {
     let chunks = Layout::vertical([
-        Constraint::Length(3),  // header
-        Constraint::Length(3),  // cores
-        Constraint::Length(10), // timeline
-        Constraint::Min(5),     // processes
-        Constraint::Length(1),  // help
+        Constraint::Length(HEADER_H),
+        Constraint::Length(CORES_H),
+        Constraint::Length(TIMELINE_H),
+        Constraint::Min(5),    // processes
+        Constraint::Length(1), // help
     ])
     .split(f.area());
 

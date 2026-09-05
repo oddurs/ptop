@@ -125,7 +125,7 @@ above the legibility floor. Visual check via `show_frame`.
 
 ---
 
-## C6 — Status colours reserved  ·  `S`
+## C6 — Status colours reserved  ·  `S`  ·  **DONE**
 
 **What.** Audit every use of `ok`/`warn`/`critical` and confirm each means a
 *state*, not an identity. Series identity uses series tokens only.
