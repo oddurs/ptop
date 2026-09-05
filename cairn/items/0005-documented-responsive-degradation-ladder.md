@@ -2,7 +2,7 @@
 id: 5
 title: Documented responsive degradation ladder
 type: feature
-status: backlog
+status: done
 milestone: v0.1
 created: 2026-09-05
 updated: 2026-09-05

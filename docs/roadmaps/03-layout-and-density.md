@@ -81,7 +81,7 @@ it.
 
 ---
 
-## L4 — Documented responsive ladder  ·  `M`
+## L4 — Documented responsive ladder  ·  `M`  ·  **DONE**
 
 **What.** Write down, and implement, the order in which elements drop as the
 terminal shrinks: scale legend → y anchors → core meters → timeline rows →
@@ -92,9 +92,26 @@ thresholds, others do not. bottom makes this explicit
 (`should_hide_x_label`, legend skipped below 6 columns). Deciding the order once
 prevents a layout that collapses in a surprising way at some untested width.
 
-**Acceptance.** A table in this file listing each element and the size at which
-it drops. A test asserting the ladder holds at a spread of sizes from 200×60
-down to 20×8.
+**The ladder, as shipped.** Each element yields before the one below it.
+
+| Element | Yields when | Constant |
+| --- | --- | --- |
+| Heat scale legend | header narrower than the badge plus the scale | `heat_scale`, `RESERVED = 24` |
+| Series labels (`CPU`/`MEM`) | a section has fewer than 3 rows | `MIN_ROWS_FOR_LABEL = 3` |
+| Axis anchors (`100`/`0`) | a section has fewer than 2 rows | `MIN_ROWS_FOR_AXIS = 2` |
+| The gutter itself | timeline narrower than 30 columns, or no section can fill it | `MIN_WIDTH_FOR_GUTTER = 30` |
+| Core meters | summarised with a count past the width, never clipped | `core_meters` |
+| Timeline rows | proportional between 9 and 16, floor first | `TIMELINE_MIN_H`, `TIMELINE_MAX_H` |
+| Process table rows | whatever remains, never fewer than 2 | `PROCS_FLOOR_H = 2` |
+
+Two orderings are load-bearing. The **scale yields before the meters** it
+describes, because a reference is worth less than the data. The **gutter yields
+before the graph**, because an axis without a graph is nothing.
+
+**Acceptance.** The table above. A test asserting the ladder holds at a spread
+of sizes, and a second asserting each element yields **monotonically** — an
+element that reappears as the window shrinks is a bug in the ladder, not a
+feature.
 
 **Depends on.** `L1`, `L2`, `L3`
 

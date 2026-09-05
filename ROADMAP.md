@@ -6,16 +6,19 @@ A system monitor you can rewind.
 
 ## v0.1 — The rewind works
 
-`··········` 0% · 0 of 4 done · due 2026-10-01
+`###·······` 25% · 1 of 4 done · due 2026-10-01
 
 Timeline, scrubbing, process tree, colour that survives a colourblind reader and a monochrome terminal.
 
 ### backlog
 
-- [ ] `0005` Documented responsive degradation ladder <sup>feature · p2</sup>
 - [ ] `0008` Micro-bar in the CPU column <sup>feature · p2</sup>
 - [ ] `0009` Micro-bar for memory, scaled to the machine <sup>feature · p3</sup>
 - [ ] `0010` Per-process sparkline from history <sup>feature · p0</sup>
+
+### done
+
+- [x] `0005` Documented responsive degradation ladder <sup>feature · p2</sup>
 
 ## v0.2 — Cheap enough to run
 

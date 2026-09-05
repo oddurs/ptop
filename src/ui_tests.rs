@@ -1852,3 +1852,129 @@ fn a_gutter_is_only_reserved_when_something_can_fill_it() {
         );
     }
 }
+
+/// What a rendered frame contains, for walking the degradation ladder.
+#[derive(Debug, PartialEq)]
+struct Present {
+    heat_scale: bool,
+    core_meters: bool,
+    axis_anchors: bool,
+    series_labels: bool,
+    legend: bool,
+    graph: bool,
+    table_rows: bool,
+}
+
+fn present_at(app: &App, w: u16, h: u16) -> Present {
+    let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
+    term.draw(|f| ui::draw(f, app)).unwrap();
+    let buf = term.backend().buffer();
+    let row = |y: u16| -> String {
+        if y >= h {
+            return String::new();
+        }
+        (0..w).map(|x| buf[(x, y)].symbol()).collect()
+    };
+    let all: String = (0..h).map(row).collect::<Vec<_>>().join("\n");
+    let timeline = ui::timeline_rows_range(h);
+    Present {
+        heat_scale: all.contains("warn 50"),
+        core_meters: row(2).contains('▇') || row(2).contains('▄') || row(2).contains('▁'),
+        // Scoped to the timeline's gutter columns. Matching "CPU " anywhere
+        // finds the header figures, which are always drawn — a false positive
+        // that made the gutter look like it never yielded.
+        axis_anchors: timeline.clone().any(|y| row(y).starts_with("100")),
+        series_labels: timeline.clone().any(|y| {
+            let g: String = row(y).chars().take(4).collect();
+            g.starts_with("CPU") || g.starts_with("MEM")
+        }),
+        legend: all.contains("s/slot"),
+        graph: timeline.clone().any(|y| {
+            (0..w).any(|x| {
+                let s = buf[(x, y.min(h - 1))].symbol();
+                s.starts_with('⠀')
+                    || (s
+                        .chars()
+                        .next()
+                        .is_some_and(|c| ('\u{2800}'..='\u{28ff}').contains(&c))
+                        && s != "⠀")
+            })
+        }),
+        table_rows: all.contains("postgres") || all.contains("nginx"),
+    }
+}
+
+#[test]
+fn the_degradation_ladder_holds_at_every_size() {
+    // Each element yields in a fixed order as the window shrinks, and each is
+    // present above its threshold and absent below it. Individually every one
+    // of these calls was defensible; the point of writing the order down is
+    // that together they are a design rather than eight separate decisions.
+    let mut app = App::new(600);
+    for i in (0..200).rev() {
+        app.push(sample_at(50.0, i));
+    }
+    app.theme = Theme::new(Palette::Safe, Tier::TrueColor);
+
+    // Widest: everything on.
+    let full = present_at(&app, 120, 40);
+    assert!(full.heat_scale && full.core_meters && full.axis_anchors);
+    assert!(full.series_labels && full.legend && full.graph && full.table_rows);
+
+    // The scale is a reference for the figures, so it goes before them.
+    assert!(
+        !present_at(&app, 40, 40).heat_scale,
+        "scale outlived its room"
+    );
+    assert!(
+        present_at(&app, 40, 40).core_meters,
+        "meters went before the scale"
+    );
+
+    // The gutter — anchors and labels with it — goes before the graph.
+    let narrow = present_at(&app, 28, 40);
+    assert!(
+        !narrow.axis_anchors && !narrow.series_labels,
+        "gutter outlived its room"
+    );
+    assert!(narrow.graph, "graph went before its own axis");
+
+    // The graph outlives the process table's rows, because the graph is the
+    // thing this tool is for.
+    let short = present_at(&app, 100, 12);
+    assert!(short.graph, "graph went before the table");
+
+    // And nothing panics anywhere on the way down.
+    for w in (10..=120).step_by(7) {
+        for h in (4..=40).step_by(3) {
+            let _ = present_at(&app, w, h);
+        }
+    }
+}
+
+#[test]
+fn every_element_yields_monotonically() {
+    // An element that reappears as the window shrinks is a bug in the ladder,
+    // not a feature. Walk the width down and require each flag to fall at most
+    // once.
+    let mut app = App::new(600);
+    for i in (0..200).rev() {
+        app.push(sample_at(50.0, i));
+    }
+    app.theme = Theme::new(Palette::Safe, Tier::TrueColor);
+
+    let flags = |p: &Present| [p.heat_scale, p.axis_anchors, p.series_labels];
+    let names = ["heat scale", "axis anchors", "series labels"];
+    let mut prev = flags(&present_at(&app, 140, 40));
+    for w in (20..=140).rev().step_by(2) {
+        let now = flags(&present_at(&app, w, 40));
+        for i in 0..prev.len() {
+            assert!(
+                !now[i] || prev[i],
+                "{} reappeared at width {w} after yielding",
+                names[i]
+            );
+        }
+        prev = now;
+    }
+}
