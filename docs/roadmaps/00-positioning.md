@@ -44,7 +44,7 @@ process tables** — a usability position against atop, not a capability one.
 
 ---
 
-## X2 — Comparison table  ·  `S`
+## X2 — Comparison table  ·  `S`  ·  **DONE**
 
 **What.** A table in the README covering ptop, htop, btop, bottom, zenith, atop
 across: live view, historical charts, historical process table, exited-process
