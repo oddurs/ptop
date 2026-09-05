@@ -293,23 +293,35 @@ fn zoom_is_clamped_to_what_the_buffer_can_fill() {
 
 #[test]
 fn timeline_fills_its_panel_with_no_blank_rows() {
+    // The acceptance test for L1. Its bounds previously skipped the border
+    // rows and column — which after L1 are exactly the space the change
+    // reclaimed, so a regression leaving the last row blank would have passed.
+    let (w, h) = (60u16, 10u16);
     let mut app = App::new(600);
     for i in (0..200).rev() {
         app.push(sample_at(50.0, i));
     }
-    let mut term = Terminal::new(TestBackend::new(60, 10)).unwrap();
+    app.theme = Theme::new(Palette::Safe, Tier::TrueColor);
+
+    let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
     term.draw(|f| ui::draw_timeline_for_test(f, f.area(), &app))
         .unwrap();
     let buf = term.backend().buffer();
-    // Rows 1..=8 are inside the border; none may be entirely empty.
-    for y in 1..9 {
-        let row: String = (0..60).map(|x| buf[(x, y)].symbol()).collect();
-        let inner = &row[row.char_indices().nth(1).unwrap().0..];
+
+    // Every row, including the first (the section rule) and the last.
+    for y in 0..h {
+        let row: String = (0..w).map(|x| buf[(x, y)].symbol()).collect();
         assert!(
-            inner.chars().any(|c| c != ' ' && c != '│'),
-            "row {y} is blank: {row:?}"
+            row.chars().any(|c| c != ' '),
+            "row {y} of the timeline is blank:\n{row:?}"
         );
     }
+    // And column 0, which used to be a border, now carries content.
+    let col0: String = (1..h).map(|y| buf[(0, y)].symbol()).collect();
+    assert!(
+        col0.chars().any(|c| c != ' '),
+        "column 0 is unused: {col0:?}"
+    );
 }
 
 #[test]
@@ -670,14 +682,13 @@ fn the_default_theme_is_the_colour_vision_safe_one() {
 }
 
 #[test]
-fn every_panel_border_uses_the_chrome_token() {
-    // Scans the left and right edge columns only. Glyph-matching the whole
-    // buffer looked equivalent and was not: `tree.rs` draws its spine with
-    // │ ├ └, so with tree mode on the scan flagged a spine glyph inside a
-    // table cell as an unstyled border. Panel edges are unambiguous — nothing
-    // but a border ever occupies column 0 or the last column.
+fn every_section_rule_uses_the_chrome_token() {
+    // Replaces the panel-border test: L1 removed the boxes. Identifies a rule
+    // by its shape — a row that is mostly `─` — rather than by hardcoded row
+    // numbers, so it keeps working as sections move. The tree spine also draws
+    // `─`, but only a glyph or two per row, so the majority test excludes it.
     //
-    // Tree mode is on here precisely so that regression cannot come back.
+    // Tree mode is on for exactly that reason.
     let mut app = App::new(60);
     app.push(sample(50.0));
     app.theme = Theme::new(Palette::Safe, Tier::TrueColor);
@@ -688,20 +699,24 @@ fn every_panel_border_uses_the_chrome_token() {
     term.draw(|f| ui::draw(f, &app)).unwrap();
     let buf = term.backend().buffer();
 
-    let mut edges = 0;
+    let mut rules = 0;
     for y in 0..h {
-        for x in [0, w - 1] {
+        let dashes = (0..w).filter(|&x| buf[(x, y)].symbol() == "─").count();
+        if dashes * 2 < w as usize {
+            continue;
+        }
+        rules += 1;
+        for x in 0..w {
             let c = &buf[(x, y)];
-            if matches!(c.symbol(), "─" | "│" | "┌" | "┐" | "└" | "┘") {
-                edges += 1;
+            if c.symbol() == "─" {
                 assert_eq!(
                     c.fg, app.theme.chrome,
-                    "panel edge at ({x},{y}) is not chrome-coloured"
+                    "section rule at ({x},{y}) is not chrome-coloured"
                 );
             }
         }
     }
-    assert!(edges > 20, "expected panel edges, saw {edges}");
+    assert!(rules >= 3, "expected a rule per section, saw {rules}");
 }
 
 #[test]
@@ -726,8 +741,10 @@ fn the_tree_spine_recedes_like_a_gridline() {
         // Column 0 is the panel edge; the spine lives inside the COMMAND cell.
         for x in 1..99u16 {
             let c = &buf[(x, y)];
-            if matches!(c.symbol(), "├" | "└" | "─") && buf[(0, y)].symbol() == "│" {
-                // Only count glyphs inside the table body, not panel rules.
+            // Both halves of the prefix. They share a span today, but the
+            // test should state what its name claims rather than rely on that.
+            if matches!(c.symbol(), "├" | "└" | "─") {
+                // Only the spine inside the COMMAND column, not section rules.
                 if x > 40 {
                     spine += 1;
                     assert_eq!(
@@ -748,9 +765,9 @@ fn rule_rows(app: &App, w: u16, h: u16) -> Vec<usize> {
     term.draw(|f| ui::draw_timeline_for_test(f, f.area(), app))
         .unwrap();
     let buf = term.backend().buffer();
-    (1..h - 1)
+    (1..h)
         .filter(|&y| {
-            (1..w - 1).any(|x| {
+            (0..w).any(|x| {
                 let c = &buf[(x, y)];
                 c.fg == app.theme.chrome && c.symbol() != " "
             })
@@ -772,7 +789,7 @@ fn the_rules_land_on_exactly_the_threshold_rows() {
     app.theme = Theme::new(Palette::Safe, Tier::TrueColor);
 
     // Same arithmetic the renderer uses, so the expectation tracks the layout.
-    let graph_rows = (h as usize - 2).saturating_sub(2).max(1);
+    let graph_rows = (h as usize - 1).saturating_sub(2).max(1);
     let cpu_rows = (graph_rows * 3 / 5).max(1);
     let mem_rows = graph_rows - cpu_rows;
 
@@ -840,7 +857,7 @@ fn the_rule_is_dashed_so_it_cannot_be_read_as_data() {
 
     let rule_y = 1 + crate::glyphs::rule_position(
         crate::theme::Theme::CRITICAL_PCT,
-        ((h as usize - 4).max(1) * 3 / 5).max(1),
+        (((h as usize - 1).saturating_sub(2)).max(1) * 3 / 5).max(1),
     )
     .unwrap()
     .0 as u16;
@@ -913,7 +930,7 @@ fn the_cursor_stays_over_its_own_column_once_the_gutter_exists() {
     app.history.scrub(-7);
 
     let gutter = 4usize;
-    let graph_w = (w as usize - 2) - gutter;
+    let graph_w = w as usize - gutter;
     let spc = app.glyphs.samples_per_cell();
     let slots = graph_w * spc;
     let zoom = crate::app::effective_zoom(app.zoom(), n, slots);
@@ -921,7 +938,7 @@ fn the_cursor_stays_over_its_own_column_once_the_gutter_exists() {
     let dropped = app.history.len() - shown;
     let idx = app.history.cursor_index() - dropped;
     let slot = crate::history::slot_of_index(idx, shown, zoom, slots);
-    let expected = 1 + gutter as u16 + (slot / spc) as u16;
+    let expected = gutter as u16 + (slot / spc) as u16;
 
     assert_eq!(
         cursor_column(&app, w, h),
@@ -940,10 +957,10 @@ fn gutter_text(app: &App, w: u16, h: u16) -> String {
     term.draw(|f| ui::draw_timeline_for_test(f, f.area(), app))
         .unwrap();
     let buf = term.backend().buffer();
-    let graph_rows = (h as usize - 2).saturating_sub(2).max(1);
+    let graph_rows = (h as usize - 1).saturating_sub(2).max(1);
     (0..graph_rows)
         .map(|row| {
-            (1..5u16.min(w - 1))
+            (0..4u16.min(w))
                 .map(|x| buf[(x, 1 + row as u16)].symbol())
                 .collect::<String>()
         })
@@ -997,7 +1014,7 @@ fn a_section_too_short_for_both_ends_carries_no_axis_at_all() {
             .lines()
             .map(str::to_string)
             .collect();
-        let graph_rows = (h as usize - 2).saturating_sub(2).max(1);
+        let graph_rows = (h as usize - 1).saturating_sub(2).max(1);
         let cpu_rows = (graph_rows * 3 / 5).max(1);
         let mem_rows = graph_rows - cpu_rows;
 
@@ -1032,10 +1049,10 @@ fn the_gutter_never_overlaps_the_graph() {
         .unwrap();
     let buf = term.backend().buffer();
 
-    let graph_rows = (h as usize - 2).saturating_sub(2).max(1);
+    let graph_rows = (h as usize - 1).saturating_sub(2).max(1);
     for row in 0..graph_rows {
         let y = 1 + row as u16;
-        for x in 1..5u16 {
+        for x in 0..4u16 {
             let s = buf[(x, y)].symbol();
             // The concrete allowed set, not "any alphanumeric": a future glyph
             // set that used a letter would otherwise pass this silently.
@@ -1110,16 +1127,21 @@ fn the_legend_keeps_identifying_the_series_when_the_gutter_cannot() {
 fn readme_frame() {
     let mut app = App::new(600);
     for i in 0..300 {
-        let t = i as f32;
-        let mut s = sample_at((t * 0.7).sin().abs() * 95.0, 300 - i);
-        s.mem.used = ((8.0 + (t * 0.2).sin() * 3.0) as u64) << 30;
+        let x = i as f32;
+        let mut s = sample_at((x * 0.7).sin().abs() * 95.0, 300 - i);
+        s.mem.used = ((8.0 + (x * 0.2).sin() * 3.0) as u64) << 30;
+        s.procs = vec![
+            proc_named(1, "systemd", 0.1, 12 << 20),
+            proc_named(824, "postgres", 88.4, 512 << 20),
+            proc_named(1190, "nginx", 12.5, 32 << 20),
+            proc_named(2077, "node", 4.2, 148 << 20),
+        ];
         app.push(s);
     }
     app.history.scrub(-18);
     app.theme = Theme::new(Palette::Safe, Tier::TrueColor);
-    let mut term = Terminal::new(TestBackend::new(78, 11)).unwrap();
-    term.draw(|f| ui::draw_timeline_for_test(f, f.area(), &app))
-        .unwrap();
+    let mut term = Terminal::new(TestBackend::new(78, 20)).unwrap();
+    term.draw(|f| ui::draw(f, &app)).unwrap();
     let buf = term.backend().buffer();
     for y in 0..buf.area.height {
         let row: String = (0..buf.area.width).map(|x| buf[(x, y)].symbol()).collect();
@@ -1194,8 +1216,8 @@ fn the_readout_never_pushes_the_marker_off_its_column() {
             app.theme = Theme::new(Palette::Safe, Tier::TrueColor);
             app.history.scrub(-(back as isize));
 
-            let gutter = if (w as usize - 2) >= 30 { 4 } else { 0 };
-            let graph_w = (w as usize - 2) - gutter;
+            let gutter = if w as usize >= 30 { 4 } else { 0 };
+            let graph_w = w as usize - gutter;
             let spc = app.glyphs.samples_per_cell();
             let slots = graph_w * spc;
             let zoom = crate::app::effective_zoom(app.zoom(), n, slots);
@@ -1206,7 +1228,7 @@ fn the_readout_never_pushes_the_marker_off_its_column() {
             }
             let idx = app.history.cursor_index() - dropped;
             let slot = crate::history::slot_of_index(idx, shown, zoom, slots);
-            let expected = 1 + gutter as u16 + (slot / spc) as u16;
+            let expected = gutter as u16 + (slot / spc) as u16;
 
             assert_eq!(
                 cursor_column(&app, w, 12),
@@ -1321,10 +1343,10 @@ fn graph_colours(app: &App, w: u16, h: u16) -> std::collections::HashSet<String>
     term.draw(|f| ui::draw_timeline_for_test(f, f.area(), app))
         .unwrap();
     let buf = term.backend().buffer();
-    let graph_rows = (h as usize - 2).saturating_sub(2).max(1);
+    let graph_rows = (h as usize - 1).saturating_sub(2).max(1);
     let mut out = std::collections::HashSet::new();
     for row in 0..graph_rows {
-        for x in 5..w - 1 {
+        for x in 4..w {
             let c = &buf[(x, 1 + row as u16)];
             if c.fg != app.theme.chrome && c.symbol() != " " {
                 out.insert(format!("{:?}", c.fg));
@@ -1390,14 +1412,14 @@ fn status_colour_is_kept_where_it_answers_is_this_bad() {
         let mut term = Terminal::new(TestBackend::new(100, 30)).unwrap();
         term.draw(|f| ui::draw(f, &app)).unwrap();
         let buf = term.backend().buffer();
-        // Header panel is rows 0..2, cores panel rows 3..5, so the header
-        // figures are on row 1 and the core meter glyphs on row 4.
+        // Sections are now header (rows 0-1), a cores divider (row 2) and the
+        // core meters (row 3) — no border rows between them.
         let row = |y: u16| {
             (0..100u16)
                 .map(|x| format!("{:?}", buf[(x, y)].fg))
                 .collect::<String>()
         };
-        (row(1), row(4))
+        (row(1), row(3))
     };
     let (h_idle, c_idle) = styles_at(5.0);
     let (h_busy, c_busy) = styles_at(95.0);

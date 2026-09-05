@@ -20,13 +20,14 @@ around it consume 6 rows to draw boxes.
 
 ---
 
-## L1 — Replace panel borders with dividers  ·  `M`
+## L1 — Replace panel borders with dividers  ·  `M`  ·  **DONE**
 
 **What.** Drop `Borders::ALL` in favour of a single dim horizontal rule between
 sections, with the section name inline on that rule.
 
-**Why.** Recovers roughly 8 rows on a typical terminal — more usable space than
-the entire cores and header panels currently occupy. Heavy chrome also competes
+**Why.** Recovers 5 rows and 2 columns. (The original estimate of "roughly 8
+rows" counted the 8 border rows removed but not the 3 divider rows added; the
+side borders were not counted at all, and those are the 2 columns.) Heavy chrome also competes
 with the data for attention; the fix is hairline separators and breathing room.
 
 **Acceptance.** No visual regression in the panel-fills-its-space test. At least

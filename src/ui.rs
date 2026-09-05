@@ -9,7 +9,7 @@ use crate::history;
 use crate::sample::{IoRates, Sample};
 use crate::theme::Theme;
 use ratatui::prelude::*;
-use ratatui::widgets::{Block, Borders, Cell, Paragraph, Row, Table};
+use ratatui::widgets::{Cell, Paragraph, Row, Table};
 use std::time::Duration;
 
 /// Eighth-block glyphs, used to draw the timeline one cell per sample.
@@ -18,9 +18,14 @@ const BARS: [char; 8] = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█']
 /// Panel heights. Named so tests can locate a panel from the same numbers the
 /// renderer lays out with, rather than re-deriving them from a comment that
 /// silently goes stale.
-pub const HEADER_H: u16 = 3;
-pub const CORES_H: u16 = 3;
-pub const TIMELINE_H: u16 = 10;
+// One divider row per section instead of two border rows per panel, and no
+// side borders at all. On a 30-row terminal that returns five rows and two
+// columns to the data — more than the header and cores panels together used to
+// occupy. Boxes also compete with their own contents for attention; a hairline
+// rule separates without doing that.
+pub const HEADER_H: u16 = 2; // title, figures
+pub const CORES_H: u16 = 2; // divider, meters
+pub const TIMELINE_H: u16 = 9; // divider, graphs, cursor, legend
 
 /// Rows occupied by the timeline panel, borders included.
 ///
@@ -44,7 +49,7 @@ pub fn draw(f: &mut Frame, app: &App) {
 
     let Some(sample) = app.history.current() else {
         f.render_widget(
-            Paragraph::new("collecting first sample…").block(bordered("ptop", &app.theme)),
+            Paragraph::new("collecting first sample…").style(app.theme.dim_style()),
             f.area(),
         );
         return;
@@ -57,13 +62,20 @@ pub fn draw(f: &mut Frame, app: &App) {
     draw_help(f, chunks[4], app);
 }
 
-/// A panel. Borders take the most recessive token; the title a readable but
-/// still-recessive one, so neither competes with the figures inside.
-fn bordered<'a>(title: &'a str, theme: &Theme) -> Block<'a> {
-    Block::default()
-        .borders(Borders::ALL)
-        .border_style(theme.chrome_style())
-        .title(Span::styled(title, theme.title_style()))
+/// A section rule with its name on it, replacing a panel border.
+///
+/// The rule takes the most recessive token and the name a readable but still
+/// recessive one, so neither competes with the figures beneath.
+fn divider(title: &str, width: u16, theme: &Theme) -> Line<'static> {
+    let name = format!(" {} ", title.trim());
+    let lead = "─".repeat(2.min(width as usize));
+    let used = lead.chars().count() + name.chars().count();
+    let tail = "─".repeat((width as usize).saturating_sub(used));
+    Line::from(vec![
+        Span::styled(lead, theme.chrome_style()),
+        Span::styled(name, theme.title_style()),
+        Span::styled(tail, theme.chrome_style()),
+    ])
 }
 
 fn fmt_bytes(b: u64) -> String {
@@ -166,18 +178,7 @@ fn draw_header(f: &mut Frame, area: Rect, app: &App, s: &Sample) {
     }
     let title = Line::from(title);
 
-    f.render_widget(
-        Paragraph::new(Line::from(spans)).block(
-            // Built directly rather than via `bordered` because the title
-            // is a styled span (LIVE / PAUSED), but the border still takes
-            // the chrome token like every other panel.
-            Block::default()
-                .borders(Borders::ALL)
-                .border_style(app.theme.chrome_style())
-                .title(title),
-        ),
-        area,
-    );
+    f.render_widget(Paragraph::new(vec![title, Line::from(spans)]), area);
 }
 
 /// The heat ramp's scale, when the panel is wide enough to carry it.
@@ -197,8 +198,9 @@ fn heat_scale(width: u16) -> Option<String> {
         Theme::WARN_PCT,
         Theme::CRITICAL_PCT
     );
-    // Two columns for the panel's own borders, plus room for the state badge.
-    const RESERVED: usize = 2 + 24;
+    // Room for the state badge. There are no border columns to reserve since
+    // L1 — the title is a full-width content line now.
+    const RESERVED: usize = 24;
     (width as usize >= scale.chars().count() + RESERVED).then_some(scale)
 }
 
@@ -220,10 +222,14 @@ fn draw_cores(f: &mut Frame, area: Rect, s: &Sample, theme: &Theme) {
         .collect();
 
     f.render_widget(
-        Paragraph::new(Line::from(spans)).block(bordered(
-            &format!(" cores ({}) ", s.cpu_per_core.len()),
-            theme,
-        )),
+        Paragraph::new(vec![
+            divider(
+                &format!("cores ({})", s.cpu_per_core.len()),
+                area.width,
+                theme,
+            ),
+            Line::from(spans),
+        ]),
         area,
     );
 }
@@ -241,8 +247,8 @@ pub fn draw_timeline_for_test(f: &mut Frame, area: Rect, app: &App) {
 /// with braille that is ten seconds per cell, so a normal terminal shows the
 /// entire buffer.
 fn draw_timeline(f: &mut Frame, area: Rect, app: &App) {
-    let inner_w = area.width.saturating_sub(2) as usize;
-    let inner_h = area.height.saturating_sub(2) as usize;
+    let inner_w = area.width as usize;
+    let inner_h = area.height.saturating_sub(1) as usize;
     if inner_w == 0 || inner_h == 0 {
         return;
     }
@@ -360,10 +366,9 @@ fn draw_timeline(f: &mut Frame, area: Rect, app: &App) {
         fmt_lag(Duration::from_secs(app.history.capacity() as u64)),
     );
 
-    f.render_widget(
-        Paragraph::new(lines).block(bordered(&title, &app.theme)),
-        area,
-    );
+    let mut all = vec![divider(&title, area.width, &app.theme)];
+    all.extend(lines);
+    f.render_widget(Paragraph::new(all), area);
 }
 
 /// One row of graph. `row` counts from the top of a `rows`-tall graph.
@@ -629,7 +634,7 @@ fn cursor_row(app: &App, w: Window) -> Line<'static> {
 fn draw_procs(f: &mut Frame, area: Rect, app: &App) {
     let rows_data = app.visible_rows();
     let collected = app.history.current().is_some_and(|s| s.io_collected);
-    let rows_visible = area.height.saturating_sub(3) as usize;
+    let rows_visible = area.height.saturating_sub(2) as usize;
 
     // Keep the selected row on screen while scrolling through a long list.
     let offset = app.selected.saturating_sub(rows_visible.saturating_sub(1));
@@ -701,11 +706,19 @@ fn draw_procs(f: &mut Frame, area: Rect, app: &App) {
     }
     widths.push(Constraint::Min(10));
 
-    let table = Table::new(rows, widths)
-        .header(header)
-        .block(bordered(&title, &app.theme));
-
-    f.render_widget(table, area);
+    f.render_widget(
+        Paragraph::new(divider(&title, area.width, &app.theme)),
+        Rect { height: 1, ..area },
+    );
+    let table = Table::new(rows, widths).header(header);
+    f.render_widget(
+        table,
+        Rect {
+            y: area.y + 1,
+            height: area.height.saturating_sub(1),
+            ..area
+        },
+    );
 }
 
 /// One disk-rate cell.
