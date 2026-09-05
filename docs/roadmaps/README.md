@@ -16,6 +16,7 @@ measurable it carries the measurement.
 | [03-layout-and-density.md](03-layout-and-density.md) | Reclaiming vertical space | L1–L4 |
 | [04-process-table.md](04-process-table.md) | Scanning the table, per-process history | P1–P3 |
 | [05-data-fidelity.md](05-data-fidelity.md) | The gaps that limit what ptop can answer | D1–D4 |
+| [06-collection-efficiency.md](06-collection-efficiency.md) | Making the collector cheap enough for faster sampling | E1–E2 |
 
 ## Suggested order
 
@@ -36,7 +37,10 @@ measurable it carries the measurement.
 
 7. `P3` per-process sparklines. Nothing else can do this, because nothing else
    retains per-process history. See `04-process-table.md`.
-8. `D1` short-lived process capture. The largest real gap against atop.
+8. `E1`+`E2` collection efficiency. The collector costs 1.44 ms/sample today,
+   which is fine at 1 Hz and 14% of a core at 10 Hz on a busy box — and `D1`
+   wants a faster rate.
+9. `D1` short-lived process capture. The largest real gap against atop.
 
 ## Sizing
 
