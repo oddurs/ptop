@@ -34,6 +34,7 @@ cargo build --release
 | --- | --- |
 | `q` | quit |
 | `←` / `→` | scrub through history (hold `Shift` for ten at a time) |
+| `+` / `-` | zoom the timeline in and out |
 | `Space` | pause on the current sample, or resume live |
 | `Home` / `End` | jump to oldest / live |
 | `↑` / `↓` | select a process |
@@ -42,6 +43,17 @@ cargo build --release
 
 `ptop --once` prints a single plain-text sample and exits, for scripts and cron.
 `ptop --bench` times 20 collection passes, for checking the cost of a change.
+
+`--glyphs=braille|block|ascii` picks how the timeline is drawn. Braille packs
+two samples into every character cell and stacks cells vertically for twelve
+distinct heights; `block` needs less font support; `ascii` needs none. A Linux
+console (`TERM=linux`) selects `ascii` automatically.
+
+Zooming aggregates samples into slots by **peak, never mean** — averaging a
+100% spike with three idle samples would render 25% and hide the exact event
+the tool exists to catch. Zoom is clamped to what the buffer can fill, so
+zooming out never shrinks the graph into a corner; the empty region on the left
+at full zoom is real time from before the buffer starts.
 
 ## How it works
 
@@ -96,10 +108,9 @@ them:
   terminals that cannot render braille. Any Unicode-dependent drawing needs a
   plain-ASCII path.
 
-Not adopted yet, in rough priority order: braille timeline rendering (btop packs
-two samples per character cell, which would double the visible history window at
-the cost of halving vertical resolution and needing that ASCII fallback);
-column-driven collection flags; the process tree.
+Braille rendering and timeline zoom are now implemented (`src/glyphs.rs`,
+`History::peak_slots`). Still to come: column-driven collection flags and the
+process tree.
 
 ## Status
 

@@ -113,6 +113,45 @@ impl History {
     }
 }
 
+/// Aggregate the newest values into exactly `slots` display slots.
+///
+/// Right-aligned on purpose: the newest value always lands in the last slot, so
+/// slot boundaries do not shift under the viewer every time a sample arrives.
+/// Leading slots with nothing to show are `None` rather than zero, so an
+/// unfilled buffer reads as empty instead of as an idle machine.
+///
+/// Each slot takes the **peak** of the samples it covers, never the mean.
+/// Averaging a 100% spike with three idle samples renders 25% and hides exactly
+/// the event this tool exists to catch.
+pub fn peak_slots(values: &[f32], zoom: usize, slots: usize) -> Vec<Option<f32>> {
+    let zoom = zoom.max(1);
+    let n = values.len();
+    let mut out = vec![None; slots];
+
+    for (k, slot) in out.iter_mut().rev().enumerate() {
+        // Slot k back from the right covers the k-th block of `zoom` values,
+        // counting back from the newest.
+        let end = n.saturating_sub(k * zoom);
+        if end == 0 {
+            break;
+        }
+        let start = end.saturating_sub(zoom);
+        *slot = values[start..end]
+            .iter()
+            .copied()
+            .fold(None::<f32>, |acc, v| Some(acc.map_or(v, |a: f32| a.max(v))));
+    }
+    out
+}
+
+/// Which display slot holds the sample at `index` within a window of
+/// `n_values`, under the same right-aligned packing as [`peak_slots`].
+pub fn slot_of_index(index: usize, n_values: usize, zoom: usize, slots: usize) -> usize {
+    let zoom = zoom.max(1);
+    let from_newest = n_values.saturating_sub(1).saturating_sub(index);
+    slots.saturating_sub(1).saturating_sub(from_newest / zoom)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -186,6 +225,63 @@ mod tests {
         }
         h.scrub(-100);
         assert_eq!(h.current().unwrap().cpu_total, 0.0);
+    }
+
+    #[test]
+    fn peak_slots_takes_the_peak_not_the_mean() {
+        // A lone spike among idle samples must survive aggregation.
+        let v = [0.0, 0.0, 100.0, 0.0];
+        assert_eq!(peak_slots(&v, 4, 1), vec![Some(100.0)]);
+    }
+
+    #[test]
+    fn peak_slots_is_right_aligned() {
+        let v = [1.0, 2.0, 3.0];
+        // Newest value lands in the last slot; the unfilled slot stays None.
+        assert_eq!(
+            peak_slots(&v, 1, 5),
+            vec![None, None, Some(1.0), Some(2.0), Some(3.0)]
+        );
+    }
+
+    #[test]
+    fn peak_slots_alignment_is_stable_as_samples_arrive() {
+        // The newest sample must stay pinned to the right edge, otherwise the
+        // whole graph shuffles sideways once per second.
+        let a = peak_slots(&[1.0, 2.0, 3.0, 4.0], 2, 4);
+        let b = peak_slots(&[0.0, 1.0, 2.0, 3.0, 4.0], 2, 4);
+        assert_eq!(a.last(), b.last());
+        assert_eq!(a.last(), Some(&Some(4.0)));
+    }
+
+    #[test]
+    fn peak_slots_groups_by_zoom() {
+        let v = [1.0, 9.0, 2.0, 8.0];
+        assert_eq!(peak_slots(&v, 2, 2), vec![Some(9.0), Some(8.0)]);
+    }
+
+    #[test]
+    fn peak_slots_handles_empty_input() {
+        assert_eq!(peak_slots(&[], 3, 2), vec![None, None]);
+    }
+
+    #[test]
+    fn peak_slots_drops_values_that_do_not_fit() {
+        // More values than slots can hold: the oldest fall off the left, and
+        // the newest are the ones kept.
+        let v = [1.0, 2.0, 3.0, 4.0];
+        assert_eq!(peak_slots(&v, 1, 2), vec![Some(3.0), Some(4.0)]);
+    }
+
+    #[test]
+    fn slot_of_index_tracks_the_packing() {
+        // 4 values, zoom 1, 4 slots: one slot each.
+        assert_eq!(slot_of_index(3, 4, 1, 4), 3);
+        assert_eq!(slot_of_index(0, 4, 1, 4), 0);
+        // zoom 2: values 2 and 3 share the last slot.
+        assert_eq!(slot_of_index(3, 4, 2, 2), 1);
+        assert_eq!(slot_of_index(2, 4, 2, 2), 1);
+        assert_eq!(slot_of_index(1, 4, 2, 2), 0);
     }
 
     #[test]

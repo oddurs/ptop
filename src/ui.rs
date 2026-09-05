@@ -3,7 +3,9 @@
 //! Layout, top to bottom: a summary header, per-core meters, the timeline
 //! (the reason this tool exists), the process table, and a help line.
 
-use crate::app::App;
+use crate::app::{self, App};
+use crate::glyphs::{self, GlyphSet};
+use crate::history;
 use crate::sample::Sample;
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, Cell, Paragraph, Row, Table};
@@ -16,7 +18,7 @@ pub fn draw(f: &mut Frame, app: &App) {
     let chunks = Layout::vertical([
         Constraint::Length(3), // header
         Constraint::Length(3), // cores
-        Constraint::Length(6), // timeline
+        Constraint::Length(10), // timeline
         Constraint::Min(5),    // processes
         Constraint::Length(1), // help
     ])
@@ -170,76 +172,122 @@ fn draw_cores(f: &mut Frame, area: Rect, s: &Sample) {
     );
 }
 
-/// The scrubable timeline: one column per retained sample, oldest on the left.
+/// Draw just the timeline panel, for visual inspection in tests.
+#[cfg(test)]
+pub fn draw_timeline_for_test(f: &mut Frame, area: Rect, app: &App) {
+    draw_timeline(f, area, app);
+}
+
+/// The scrubable timeline, oldest on the left.
+///
+/// Two packings compose here: each character cell holds `samples_per_cell`
+/// display slots, and each slot aggregates `zoom` samples by peak. At zoom 5
+/// with braille that is ten seconds per cell, so a normal terminal shows the
+/// entire buffer.
 fn draw_timeline(f: &mut Frame, area: Rect, app: &App) {
     let inner_w = area.width.saturating_sub(2) as usize;
-    if inner_w == 0 {
+    let inner_h = area.height.saturating_sub(2) as usize;
+    if inner_w == 0 || inner_h == 0 {
         return;
     }
 
+    // Reserve the cursor marker and legend, then divide the rest exactly so no
+    // row is left blank. CPU takes the larger share as the spikier signal.
+    let graph_rows = inner_h.saturating_sub(2).max(1);
+    let cpu_rows = (graph_rows * 3 / 5).max(1);
+    let mem_rows = graph_rows.saturating_sub(cpu_rows);
+
+    let spc = app.glyphs.samples_per_cell();
+    let slots = inner_w * spc;
     let samples: Vec<&Sample> = app.history.iter().collect();
-    // The buffer usually holds more samples than the terminal has columns, so
-    // show the most recent window that fits rather than squashing everything.
-    let start = samples.len().saturating_sub(inner_w);
-    let window = &samples[start..];
-    let cursor_col = app.history.cursor_index().saturating_sub(start);
+    let zoom = app::effective_zoom(app.zoom(), samples.len(), slots);
+    let shown = (slots * zoom).min(samples.len());
+    let window = &samples[samples.len() - shown..];
 
-    let mut cpu_row = Vec::with_capacity(window.len());
-    let mut mem_row = Vec::with_capacity(window.len());
+    let cpu: Vec<f32> = window.iter().map(|s| s.cpu_total).collect();
+    let mem: Vec<f32> = window.iter().map(|s| s.mem.used_pct()).collect();
+    let cpu_slots = history::peak_slots(&cpu, zoom, slots);
+    let mem_slots = history::peak_slots(&mem, zoom, slots);
 
-    for (i, s) in window.iter().enumerate() {
-        let on_cursor = i == cursor_col && !app.history.is_live();
-        for (row, pct) in [(&mut cpu_row, s.cpu_total), (&mut mem_row, s.mem.used_pct())] {
-            let idx = ((pct / 100.0 * 7.0).round() as usize).min(7);
-            let mut style = Style::default().fg(heat(pct));
-            if on_cursor {
-                style = style.bg(Color::White).add_modifier(Modifier::BOLD);
-            }
-            row.push(Span::styled(BARS[idx].to_string(), style));
+    let mut lines: Vec<Line> = Vec::with_capacity(inner_h);
+    for (values, rows) in [(&cpu_slots, cpu_rows), (&mem_slots, mem_rows)] {
+        for row in 0..rows {
+            lines.push(glyph_row(app.glyphs, values, row, rows, spc));
         }
     }
 
-    // A caret row under the bars, so the cursor is legible without relying on
-    // colour at all.
-    let mut marker_row: Vec<Span> = Vec::new();
-    if !app.history.is_live() {
-        let mut m = vec![' '; window.len()];
-        if let Some(slot) = m.get_mut(cursor_col) {
-            *slot = '▲';
-        }
-        marker_row.push(Span::styled(
-            m.into_iter().collect::<String>(),
-            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
-        ));
+    lines.push(cursor_row(app, window.len(), zoom, slots, spc, inner_w));
+
+    if lines.len() < inner_h {
+        let span = fmt_lag(Duration::from_secs(window.len() as u64));
+        lines.push(Line::from(Span::styled(
+            format!("cpu · mem — {span} shown, {zoom}s/slot — ←/→ scrub, +/- zoom"),
+            Style::default().add_modifier(Modifier::DIM),
+        )));
     }
 
     let title = format!(
-        " timeline — {}s shown, {}s of {}s buffered ",
-        window.len(),
-        app.history.len(),
-        app.history.capacity()
+        " timeline — {} of {} buffered ",
+        fmt_lag(Duration::from_secs(app.history.len() as u64)),
+        fmt_lag(Duration::from_secs(app.history.capacity() as u64)),
     );
 
-    let scale_row = if marker_row.is_empty() {
-        Line::from(vec![Span::styled(
+    f.render_widget(Paragraph::new(lines).block(bordered(&title)), area);
+}
+
+/// One row of graph. `row` counts from the top of a `rows`-tall graph.
+fn glyph_row(set: GlyphSet, values: &[Option<f32>], row: usize, rows: usize, spc: usize) -> Line<'static> {
+    let spans = values
+        .chunks(spc)
+        .map(|cell| {
+            let pcts: Vec<f32> = cell.iter().map(|v| v.unwrap_or(0.0)).collect();
+            let left = glyphs::level_in_row(pcts[0], row, rows);
+            let right = glyphs::level_in_row(*pcts.get(1).unwrap_or(&pcts[0]), row, rows);
+            // Colour by the peak of the pair: a cell holding a spike and an
+            // idle sample should read as hot, not as lukewarm.
+            let peak = pcts.iter().copied().fold(0.0_f32, f32::max);
+            Span::styled(
+                set.glyph(left, right).to_string(),
+                Style::default().fg(heat(peak)),
+            )
+        })
+        .collect::<Vec<_>>();
+    Line::from(spans)
+}
+
+/// The row under the graph marking where the scrub cursor sits.
+///
+/// When a cell holds two samples the marker picks the correct half, so packing
+/// never costs cursor precision.
+fn cursor_row(
+    app: &App,
+    n_values: usize,
+    zoom: usize,
+    slots: usize,
+    spc: usize,
+    inner_w: usize,
+) -> Line<'static> {
+    if app.history.is_live() || n_values == 0 {
+        return Line::from(Span::styled(
             format!("{:<width$}now", "past", width = inner_w.saturating_sub(3)),
             Style::default().add_modifier(Modifier::DIM),
-        )])
-    } else {
-        Line::from(marker_row)
-    };
+        ));
+    }
 
-    let text = vec![
-        Line::from(cpu_row),
-        Line::from(mem_row),
-        scale_row,
-        Line::from(vec![Span::styled(
-            "cpu (top) · mem (bottom) — ←/→ scrub, Space live",
-            Style::default().add_modifier(Modifier::DIM),
-        )]),
-    ];
+    // The cursor is an index into the whole buffer; the graph shows a window of
+    // the newest `n_values`, so rebase before locating it.
+    let dropped = app.history.len().saturating_sub(n_values);
+    let idx = app.history.cursor_index().saturating_sub(dropped);
+    let slot = history::slot_of_index(idx, n_values, zoom, slots);
 
-    f.render_widget(Paragraph::new(text).block(bordered(&title)), area);
+    let mut row = vec![' '; inner_w];
+    if let Some(cell) = row.get_mut(slot / spc) {
+        *cell = app.glyphs.cursor_marker(spc == 2 && slot % spc == 1);
+    }
+    Line::from(Span::styled(
+        row.into_iter().collect::<String>(),
+        Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+    ))
 }
 
 fn draw_procs(f: &mut Frame, area: Rect, app: &App) {

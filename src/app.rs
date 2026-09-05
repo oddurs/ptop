@@ -1,7 +1,30 @@
 //! Application state and input handling.
 
+use crate::glyphs::GlyphSet;
 use crate::history::History;
 use crate::sample::{ProcSample, Sample};
+
+/// Samples per display slot.
+///
+/// Kept modest deliberately: a slot count of ~200 (braille on a normal
+/// terminal) needs only 3-4 samples per slot to cover the whole ten-minute
+/// buffer, and a narrow terminal needs ~8. Offering 30 would just give three
+/// keypresses that visibly do nothing, since [`effective_zoom`] clamps to what
+/// the buffer can actually fill.
+pub const ZOOM_LEVELS: [usize; 4] = [1, 2, 4, 8];
+
+/// The zoom actually used to draw, given how much history exists.
+///
+/// Zooming past the point where the whole buffer is on screen only shrinks the
+/// data into a corner, so it is clamped. The empty region to the left of a
+/// fully zoomed-out graph is meaningful — it is time from before the buffer
+/// starts, not missing data.
+pub fn effective_zoom(requested: usize, samples: usize, slots: usize) -> usize {
+    if slots == 0 {
+        return requested.max(1);
+    }
+    requested.max(1).min(samples.div_ceil(slots).max(1))
+}
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Sort {
@@ -39,6 +62,9 @@ pub struct App {
     pub filter: String,
     pub editing_filter: bool,
     pub should_quit: bool,
+    /// Index into [`ZOOM_LEVELS`].
+    zoom_idx: usize,
+    pub glyphs: GlyphSet,
 }
 
 impl App {
@@ -50,7 +76,24 @@ impl App {
             filter: String::new(),
             editing_filter: false,
             should_quit: false,
+            zoom_idx: 0,
+            glyphs: GlyphSet::default(),
         }
+    }
+
+    /// Samples per display slot.
+    pub fn zoom(&self) -> usize {
+        ZOOM_LEVELS[self.zoom_idx]
+    }
+
+    /// Zoom out: more time on screen, coarser slots.
+    pub fn zoom_out(&mut self) {
+        self.zoom_idx = (self.zoom_idx + 1).min(ZOOM_LEVELS.len() - 1);
+    }
+
+    /// Zoom in: less time on screen, one slot per sample at the limit.
+    pub fn zoom_in(&mut self) {
+        self.zoom_idx = self.zoom_idx.saturating_sub(1);
     }
 
     pub fn push(&mut self, s: Sample) {

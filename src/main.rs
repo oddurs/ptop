@@ -9,6 +9,7 @@
 
 mod app;
 mod collect;
+mod glyphs;
 mod history;
 mod sample;
 mod ui;
@@ -30,6 +31,9 @@ USAGE:
     ptop --once     print one plain-text sample and exit
     ptop --bench    time 20 collection passes (development)
 
+    --glyphs=SET    timeline drawing: braille (default), block, or ascii.
+                    Falls back to ascii automatically on a Linux console.
+
 OPTIONS:
     -h, --help      show this help
     -V, --version   show version
@@ -37,6 +41,7 @@ OPTIONS:
 KEYS:
     q               quit
     Left/Right      scrub through history (Shift for 10 at a time)
+    + / -           zoom the timeline in and out
     Space           pause on the current sample, or resume live
     Home/End        jump to oldest / live
     Up/Down         select a process
@@ -49,9 +54,34 @@ const SAMPLE_INTERVAL: Duration = Duration::from_secs(1);
 /// Samples retained, so ten minutes of scrollback at one per second.
 const HISTORY_LEN: usize = 600;
 
+/// Braille unless we are on a real Linux console, whose font has no braille
+/// glyphs. btop makes the same check (`btop.cpp:815`).
+fn default_glyphs() -> glyphs::GlyphSet {
+    match std::env::var("TERM").as_deref() {
+        Ok("linux") => glyphs::GlyphSet::Ascii,
+        _ => glyphs::GlyphSet::Braille,
+    }
+}
+
 fn main() -> io::Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mut collector = Platform::new()?;
+
+    let mut glyphs = default_glyphs();
+    let mut positional = Vec::new();
+    for a in &args {
+        match a.strip_prefix("--glyphs=") {
+            Some(name) => match glyphs::GlyphSet::parse(name) {
+                Some(set) => glyphs = set,
+                None => {
+                    eprintln!("ptop: unknown glyph set '{name}' (braille, block, ascii)");
+                    std::process::exit(2);
+                }
+            },
+            None => positional.push(a.clone()),
+        }
+    }
+    let args = positional;
 
     match args.first().map(String::as_str) {
         Some("--once") => return once(&mut collector),
@@ -83,6 +113,7 @@ fn main() -> io::Result<()> {
     }
 
     let mut app = App::new(HISTORY_LEN);
+    app.glyphs = glyphs;
 
     // Collect once before drawing so the first frame has real numbers. CPU
     // still reads zero — there is no previous counter to diff against yet.
@@ -230,6 +261,10 @@ fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
         KeyCode::Down | KeyCode::Char('j') => app.select_delta(1),
         KeyCode::PageUp => app.select_delta(-10),
         KeyCode::PageDown => app.select_delta(10),
+
+        // '=' so zooming out does not require Shift on most layouts.
+        KeyCode::Char('+' | '=') => app.zoom_in(),
+        KeyCode::Char('-' | '_') => app.zoom_out(),
 
         KeyCode::Char('s') => {
             app.sort = app.sort.next();

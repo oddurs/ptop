@@ -99,7 +99,10 @@ fn paused_state_is_visibly_marked() {
     let out = render(&app, 100, 30);
     assert!(out.contains("PAUSED"), "paused view must not look live");
     assert!(out.contains("-4s"), "paused badge must report real elapsed lag");
-    assert!(out.contains('▲'), "scrub cursor must be visible without colour");
+    assert!(
+        out.contains('▌') || out.contains('▐'),
+        "scrub cursor must be visible without colour"
+    );
 }
 
 #[test]
@@ -138,20 +141,154 @@ fn selection_survives_the_list_shrinking_under_it() {
 #[ignore = "visual check: cargo test -- --ignored --nocapture show_frame"]
 fn show_frame() {
     let mut app = App::new(600);
-    for i in 0..90 {
+    for i in 0..300 {
         let t = i as f32;
-        let mut s = sample_at((t * 0.7).sin().abs() * 95.0, 90 - i);
+        let mut s = sample_at((t * 0.7).sin().abs() * 95.0, 300 - i);
         s.mem.used = ((8.0 + (t * 0.2).sin() * 3.0) as u64) << 30;
         app.push(s);
     }
     app.history.scrub(-18);
-    let mut term = Terminal::new(TestBackend::new(100, 26)).unwrap();
-    term.draw(|f| ui::draw(f, &app)).unwrap();
+
+    for (label, zoom_steps, set) in [
+        ("braille, zoom 1", 0, crate::glyphs::GlyphSet::Braille),
+        ("braille, zoomed out", 3, crate::glyphs::GlyphSet::Braille),
+        ("ascii fallback", 0, crate::glyphs::GlyphSet::Ascii),
+    ] {
+        let mut a = App::new(600);
+        for i in 0..300 {
+            let t = i as f32;
+            let mut s = sample_at((t * 0.7).sin().abs() * 95.0, 300 - i);
+            s.mem.used = ((8.0 + (t * 0.2).sin() * 3.0) as u64) << 30;
+            a.push(s);
+        }
+        a.history.scrub(-18);
+        a.glyphs = set;
+        for _ in 0..zoom_steps {
+            a.zoom_out();
+        }
+        println!("\n=== {label} ===");
+        let mut term = Terminal::new(TestBackend::new(100, 12)).unwrap();
+        term.draw(|f| ui::draw_timeline_for_test(f, f.area(), &a)).unwrap();
+        let buf = term.backend().buffer();
+        for y in 0..buf.area.height {
+            let row: String = (0..buf.area.width).map(|x| buf[(x, y)].symbol()).collect();
+            println!("{}", row.trim_end());
+        }
+    }
+}
+
+#[test]
+fn cursor_marker_picks_the_correct_half_of_a_cell() {
+    // Braille packs two samples per cell, so the marker has to distinguish
+    // them or scrubbing loses half its precision.
+    let mut app = App::new(60);
+    for i in (0..8).rev() {
+        app.push(sample_at(10.0, i));
+    }
+    app.glyphs = crate::glyphs::GlyphSet::Braille;
+
+    // Newest is slot 7 (right half of cell 3); one back is slot 6 (left half).
+    app.history.scrub(-1);
+    assert!(render(&app, 100, 30).contains('▌'), "odd offset is a left half");
+    app.history.scrub(-1);
+    assert!(render(&app, 100, 30).contains('▐'), "even offset is a right half");
+}
+
+#[test]
+fn ascii_glyphs_render_without_any_unicode() {
+    let mut app = App::new(60);
+    for i in (0..20).rev() {
+        app.push(sample_at(80.0, i));
+    }
+    app.glyphs = crate::glyphs::GlyphSet::Ascii;
+    app.history.scrub(-3);
+    let out = render(&app, 100, 30);
+    // Box-drawing borders are ratatui's; the graph area itself must be plain.
+    assert!(out.contains('#'), "ascii set must draw a filled bar");
+    assert!(!out.contains('⣿'), "ascii set must not emit braille");
+    assert!(out.contains('^'), "ascii cursor marker");
+}
+
+#[test]
+fn zooming_out_widens_the_time_span_shown() {
+    let mut app = App::new(600);
+    for i in (0..400).rev() {
+        app.push(sample_at(50.0, i));
+    }
+    // At zoom 1 a 40-column terminal cannot show 400 samples; zoomed out it can.
+    let narrow = 40;
+    let at_zoom_1 = render(&app, narrow, 30);
+    for _ in 0..4 {
+        app.zoom_out();
+    }
+    let at_max_zoom = render(&app, narrow, 30);
+    assert!(app.zoom() > 1);
+    assert_ne!(at_zoom_1, at_max_zoom, "zoom must change what is drawn");
+}
+
+#[test]
+fn zoom_is_clamped_at_both_ends() {
+    let mut app = App::new(60);
+    for _ in 0..20 {
+        app.zoom_in();
+    }
+    assert_eq!(app.zoom(), crate::app::ZOOM_LEVELS[0]);
+    for _ in 0..20 {
+        app.zoom_out();
+    }
+    assert_eq!(app.zoom(), *crate::app::ZOOM_LEVELS.last().unwrap());
+}
+
+#[test]
+fn a_spike_survives_aggregation_at_every_zoom_level() {
+    // The core promise: zooming out must never hide a spike.
+    for &z in crate::app::ZOOM_LEVELS.iter() {
+        let mut app = App::new(600);
+        for i in (0..120).rev() {
+            // One 100% sample buried in otherwise idle history.
+            app.push(sample_at(if i == 60 { 100.0 } else { 0.0 }, i));
+        }
+        while app.zoom() < z {
+            app.zoom_out();
+        }
+        let out = render(&app, 100, 30);
+        assert!(
+            out.contains('⣿') || out.contains('⡇') || out.contains('⢸'),
+            "spike vanished at zoom {z}"
+        );
+    }
+}
+
+#[test]
+fn zoom_is_clamped_to_what_the_buffer_can_fill() {
+    use crate::app::effective_zoom;
+    // 300 samples over 196 slots needs 2 per slot; asking for 8 would shrink
+    // the graph into a corner and leave most of the width blank.
+    assert_eq!(effective_zoom(8, 300, 196), 2);
+    assert_eq!(effective_zoom(8, 600, 196), 4);
+    // A narrow terminal genuinely needs the higher levels.
+    assert_eq!(effective_zoom(8, 600, 80), 8);
+    // Never below 1, and never divides by zero.
+    assert_eq!(effective_zoom(1, 0, 196), 1);
+    assert_eq!(effective_zoom(4, 600, 0), 4);
+}
+
+#[test]
+fn timeline_fills_its_panel_with_no_blank_rows() {
+    let mut app = App::new(600);
+    for i in (0..200).rev() {
+        app.push(sample_at(50.0, i));
+    }
+    let mut term = Terminal::new(TestBackend::new(60, 10)).unwrap();
+    term.draw(|f| ui::draw_timeline_for_test(f, f.area(), &app)).unwrap();
     let buf = term.backend().buffer();
-    for y in 0..buf.area.height {
-        let row: String = (0..buf.area.width)
-            .map(|x| buf[(x, y)].symbol())
-            .collect();
-        println!("{}", row.trim_end());
+    // Rows 1..=8 are inside the border; none may be entirely empty.
+    for y in 1..9 {
+        let row: String = (0..60).map(|x| buf[(x, y)].symbol()).collect();
+        let inner = &row[row.char_indices().nth(1).unwrap().0..];
+        assert!(
+            inner.chars().any(|c| c != ' ' && c != '│'),
+            "row {y} is blank: {row:?}"
+        );
     }
 }
