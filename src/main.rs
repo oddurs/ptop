@@ -35,6 +35,7 @@ USAGE:
 
     --glyphs=SET    timeline drawing: braille (default), block, or ascii.
                     Falls back to ascii automatically on a Linux console.
+    --color=TIER    auto (default), mono, 16, 256, or true. Honours NO_COLOR.
 
 OPTIONS:
     -h, --help      show this help
@@ -72,17 +73,32 @@ fn main() -> io::Result<()> {
     let mut collector = Platform::new()?;
 
     let mut glyphs = default_glyphs();
+    let mut tier = theme::Tier::detect();
     let mut positional = Vec::new();
     for a in &args {
-        match a.strip_prefix("--glyphs=") {
-            Some(name) => match glyphs::GlyphSet::parse(name) {
+        if let Some(name) = a.strip_prefix("--glyphs=") {
+            match glyphs::GlyphSet::parse(name) {
                 Some(set) => glyphs = set,
                 None => {
                     eprintln!("ptop: unknown glyph set '{name}' (braille, block, ascii)");
                     std::process::exit(2);
                 }
-            },
-            None => positional.push(a.clone()),
+            }
+        } else if let Some(name) = a.strip_prefix("--color=") {
+            match name {
+                // Re-detect rather than no-op, so a later --color=auto can
+                // override an earlier --color= baked into a wrapper script.
+                "auto" => tier = theme::Tier::detect(),
+                _ => match theme::Tier::parse(name) {
+                    Some(t) => tier = t,
+                    None => {
+                        eprintln!("ptop: unknown colour tier '{name}' (auto, mono, 16, 256, true)");
+                        std::process::exit(2);
+                    }
+                },
+            }
+        } else {
+            positional.push(a.clone());
         }
     }
     let args = positional;
@@ -122,6 +138,7 @@ fn main() -> io::Result<()> {
 
     let mut app = App::new(HISTORY_LEN);
     app.glyphs = glyphs;
+    app.theme = theme::Theme::new(tier);
 
     // Collect once before drawing so the first frame has real numbers. CPU
     // still reads zero — there is no previous counter to diff against yet.

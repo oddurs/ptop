@@ -528,3 +528,137 @@ fn render_digest() {
     }
     println!("RENDER_DIGEST {h:016x}");
 }
+
+#[test]
+fn mono_tier_emits_no_colour_anywhere_on_screen() {
+    // The acceptance criterion for the tier: not "mostly grey", but that no
+    // rendered cell carries a colour at all.
+    use crate::theme::{Theme, Tier};
+    let mut app = App::new(60);
+    let mut s = sample(90.0);
+    s.io_collected = true;
+    s.io_denied = 1;
+    app.push(s);
+    app.theme = Theme::new(Tier::Mono);
+    app.toggle_io();
+    app.tree = true;
+    app.history.scrub(-1);
+
+    let mut term = Terminal::new(TestBackend::new(110, 30)).unwrap();
+    term.draw(|f| ui::draw(f, &app)).unwrap();
+    let buf = term.backend().buffer();
+    for y in 0..buf.area.height {
+        for x in 0..buf.area.width {
+            let c = &buf[(x, y)];
+            assert_eq!(
+                (c.fg, c.bg),
+                (ratatui::style::Color::Reset, ratatui::style::Color::Reset),
+                "cell ({x},{y}) {:?} carries colour at the mono tier",
+                c.symbol()
+            );
+        }
+    }
+}
+
+#[test]
+fn mono_tier_still_marks_the_paused_state() {
+    // Losing colour must not lose the loudest warning in the UI.
+    use crate::theme::{Theme, Tier};
+    let mut app = App::new(60);
+    for i in (0..6).rev() {
+        app.push(sample_at(50.0, i));
+    }
+    app.theme = Theme::new(Tier::Mono);
+    app.history.scrub(-3);
+
+    let mut term = Terminal::new(TestBackend::new(100, 30)).unwrap();
+    term.draw(|f| ui::draw(f, &app)).unwrap();
+    let buf = term.backend().buffer();
+    let reversed = (0..buf.area.width).any(|x| {
+        buf[(x, 0)]
+            .modifier
+            .contains(ratatui::style::Modifier::REVERSED)
+    });
+    assert!(reversed, "PAUSED badge must stay loud without colour");
+}
+
+#[test]
+fn every_tier_renders() {
+    use crate::theme::{Theme, Tier};
+    for tier in [Tier::Mono, Tier::Ansi16, Tier::Ansi256, Tier::TrueColor] {
+        let mut app = App::new(60);
+        app.push(sample(75.0));
+        app.theme = Theme::new(tier);
+        let out = render(&app, 100, 30);
+        assert!(out.contains("postgres"), "{tier:?} failed to render");
+        // And at a size where everything is fighting for room.
+        render(&app, 20, 8);
+    }
+}
+
+#[test]
+fn coloured_tiers_actually_differ_from_mono() {
+    // Guards against a tier that silently resolves to the same styling, which
+    // would make the mono test above pass for the wrong reason.
+    use crate::theme::{Theme, Tier};
+    let styled = |tier| {
+        let mut app = App::new(60);
+        app.push(sample(90.0));
+        app.theme = Theme::new(tier);
+        let mut term = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        term.draw(|f| ui::draw(f, &app)).unwrap();
+        let buf = term.backend().buffer();
+        (0..buf.area.height)
+            .flat_map(|y| (0..buf.area.width).map(move |x| (x, y)))
+            .map(|(x, y)| format!("{:?}{:?}", buf[(x, y)].fg, buf[(x, y)].bg))
+            .collect::<String>()
+    };
+    let mono = styled(Tier::Mono);
+    assert_ne!(mono, styled(Tier::Ansi16));
+    assert_ne!(mono, styled(Tier::TrueColor));
+    assert_ne!(styled(Tier::Ansi16), styled(Tier::TrueColor));
+}
+
+#[test]
+#[ignore = "visual check: cargo test -- --ignored --nocapture show_tiers"]
+fn show_tiers() {
+    // Prints the frame with a modifier map under the header, so the monochrome
+    // tier can be eyeballed for whether meaning survives without colour.
+    use crate::theme::{Theme, Tier};
+    use ratatui::style::Modifier;
+    for tier in [Tier::Mono, Tier::TrueColor] {
+        let mut app = App::new(600);
+        for i in (0..200).rev() {
+            app.push(sample_at((i as f32 * 0.7).sin().abs() * 95.0, i));
+        }
+        app.theme = Theme::new(tier);
+        app.history.scrub(-8);
+        let mut term = Terminal::new(TestBackend::new(96, 12)).unwrap();
+        term.draw(|f| ui::draw(f, &app)).unwrap();
+        let buf = term.backend().buffer();
+        println!("\n=== {tier:?} ===");
+        for y in 0..buf.area.height {
+            let row: String = (0..buf.area.width).map(|x| buf[(x, y)].symbol()).collect();
+            println!("{}", row.trim_end());
+            if y < 2 {
+                let mods: String = (0..buf.area.width)
+                    .map(|x| {
+                        let m = buf[(x, y)].modifier;
+                        if m.contains(Modifier::REVERSED) {
+                            'R'
+                        } else if m.contains(Modifier::BOLD) {
+                            'B'
+                        } else if m.contains(Modifier::DIM) {
+                            'd'
+                        } else {
+                            ' '
+                        }
+                    })
+                    .collect();
+                if !mods.trim().is_empty() {
+                    println!("{}", mods.trim_end());
+                }
+            }
+        }
+    }
+}
