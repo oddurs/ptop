@@ -205,8 +205,19 @@ fn draw_timeline(f: &mut Frame, area: Rect, app: &App) {
     let cpu_rows = (graph_rows * 3 / 5).max(1);
     let mem_rows = graph_rows.saturating_sub(cpu_rows);
 
+    // A left gutter carrying the scale. Dropped entirely on a narrow panel:
+    // four columns of axis is a poor trade against four columns of history
+    // when there is little room, and the threshold rules still anchor the
+    // graph without it.
+    let gutter = if inner_w >= MIN_WIDTH_FOR_GUTTER {
+        GUTTER_W
+    } else {
+        0
+    };
+    let graph_w = inner_w.saturating_sub(gutter);
+
     let spc = app.glyphs.samples_per_cell();
-    let slots = inner_w * spc;
+    let slots = graph_w * spc;
     let samples: Vec<&Sample> = app.history.iter().collect();
     let zoom = app::effective_zoom(app.zoom(), samples.len(), slots);
     let shown = (slots * zoom).min(samples.len());
@@ -233,13 +244,23 @@ fn draw_timeline(f: &mut Frame, area: Rect, app: &App) {
             .collect();
         for row in 0..rows {
             let rule_level = rules.iter().find(|(r, _)| *r == row).map(|(_, l)| *l);
-            lines.push(glyph_row(
-                app.glyphs, values, row, rows, spc, &app.theme, rule_level,
-            ));
+            let mut spans = axis_label(row, rows, gutter, &app.theme);
+            spans.extend(
+                glyph_row(app.glyphs, values, row, rows, spc, &app.theme, rule_level).spans,
+            );
+            lines.push(Line::from(spans));
         }
     }
 
-    lines.push(cursor_row(app, window.len(), zoom, slots, spc, inner_w));
+    lines.push(cursor_row(
+        app,
+        window.len(),
+        zoom,
+        slots,
+        spc,
+        graph_w,
+        gutter,
+    ));
 
     if lines.len() < inner_h {
         let span = fmt_lag(Duration::from_secs(window.len() as u64));
@@ -297,6 +318,50 @@ fn glyph_row(
     Line::from(spans)
 }
 
+/// Width of the scale gutter, and the panel width below which it is dropped.
+const GUTTER_W: usize = 4;
+const MIN_WIDTH_FOR_GUTTER: usize = 30;
+/// A section shorter than this cannot carry both ends of the scale, so it
+/// carries none: see [`axis_label`].
+const MIN_ROWS_FOR_AXIS: usize = 2;
+
+// The gutter must fit inside the panel it is dropped from, or `graph_w`
+// underflows. The two constants are unrelated by construction, so tie them.
+const _: () = assert!(MIN_WIDTH_FOR_GUTTER > GUTTER_W);
+
+/// The scale marks for one graph row: `100` on the top row, `0` on the bottom.
+///
+/// A percentage graph always spans 0..100, so these do not tell a reader
+/// anything they could not assume — what they do is anchor the *geometry*, so
+/// a bar's height can be read as a value rather than only compared to its
+/// neighbours.
+fn axis_label(row: usize, rows: usize, gutter: usize, theme: &Theme) -> Vec<Span<'static>> {
+    if gutter == 0 {
+        return Vec::new();
+    }
+    // A section only one row tall spans the entire 0..100 range in that row.
+    // Labelling its top `100` states that the top of the row is the maximum,
+    // which is true, while implying the bottom is not the minimum — and `0`
+    // never appears at all. An axis that misleads is worse than no axis, so a
+    // section too short to carry both ends carries neither.
+    let text = if rows < MIN_ROWS_FOR_AXIS {
+        String::new()
+    } else if row == 0 {
+        "100".to_string()
+    } else if row + 1 == rows {
+        "0".to_string()
+    } else {
+        String::new()
+    };
+    // Right-aligned in `gutter - 1`, leaving one column of separation, so the
+    // label stays exactly `gutter` wide whatever the constant becomes.
+    let w = gutter.saturating_sub(1);
+    vec![Span::styled(
+        format!("{text:>w$} ", text = text, w = w),
+        theme.dim_style(),
+    )]
+}
+
 /// The row under the graph marking where the scrub cursor sits.
 ///
 /// When a cell holds two samples the marker picks the correct half, so packing
@@ -307,11 +372,17 @@ fn cursor_row(
     zoom: usize,
     slots: usize,
     spc: usize,
-    inner_w: usize,
+    graph_w: usize,
+    gutter: usize,
 ) -> Line<'static> {
+    let pad = " ".repeat(gutter);
     if app.history.is_live() || n_values == 0 {
         return Line::from(Span::styled(
-            format!("{:<width$}now", "past", width = inner_w.saturating_sub(3)),
+            format!(
+                "{pad}{:<width$}now",
+                "past",
+                width = graph_w.saturating_sub(3)
+            ),
             app.theme.dim_style(),
         ));
     }
@@ -322,14 +393,19 @@ fn cursor_row(
     let idx = app.history.cursor_index().saturating_sub(dropped);
     let slot = history::slot_of_index(idx, n_values, zoom, slots);
 
-    let mut row = vec![' '; inner_w];
+    let mut row = vec![' '; graph_w];
     if let Some(cell) = row.get_mut(slot / spc) {
         *cell = app.glyphs.cursor_marker(spc == 2 && slot % spc == 1);
     }
-    Line::from(Span::styled(
-        row.into_iter().collect::<String>(),
-        app.theme.cursor_style(),
-    ))
+    // The marker must sit under its own column, so the gutter is padded in
+    // rather than the row being shifted.
+    Line::from(vec![
+        Span::raw(pad),
+        Span::styled(
+            row.into_iter().collect::<String>(),
+            app.theme.cursor_style(),
+        ),
+    ])
 }
 
 fn draw_procs(f: &mut Frame, area: Rect, app: &App) {
