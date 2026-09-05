@@ -6,7 +6,7 @@
 use crate::app::{self, App};
 use crate::glyphs::{self, GlyphSet};
 use crate::history;
-use crate::sample::Sample;
+use crate::sample::{IoRates, Sample};
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, Cell, Paragraph, Row, Table};
 use std::time::Duration;
@@ -318,6 +318,7 @@ fn cursor_row(
 
 fn draw_procs(f: &mut Frame, area: Rect, app: &App) {
     let rows_data = app.visible_rows();
+    let collected = app.history.current().is_some_and(|s| s.io_collected);
     let rows_visible = area.height.saturating_sub(3) as usize;
 
     // Keep the selected row on screen while scrolling through a long list.
@@ -338,45 +339,101 @@ fn draw_procs(f: &mut Frame, area: Rect, app: &App) {
                 // parentage, but clearly not itself a hit.
                 style = style.add_modifier(Modifier::DIM);
             }
-            Row::new(vec![
+            let mut cells = vec![
                 Cell::from(p.pid.to_string()),
                 Cell::from(p.user.to_string()),
                 Cell::from(format!("{:.1}", p.cpu)).style(Style::default().fg(heat(p.cpu))),
                 Cell::from(fmt_bytes(p.rss)),
                 Cell::from(p.state.to_string()),
                 Cell::from(p.threads.to_string()),
-                Cell::from(format!("{}{}", r.prefix, p.name)),
-            ])
-            .style(style)
+            ];
+            if app.show_io {
+                cells.push(io_cell(collected, p.io, false));
+                cells.push(io_cell(collected, p.io, true));
+            }
+            cells.push(Cell::from(format!("{}{}", r.prefix, p.name)));
+            Row::new(cells).style(style)
         })
         .collect();
 
-    let header = Row::new(vec!["PID", "USER", "CPU%", "RSS", "S", "THR", "COMMAND"])
+    let mut header_cells = vec!["PID", "USER", "CPU%", "RSS", "S", "THR"];
+    if app.show_io {
+        header_cells.extend(["DISK R", "DISK W"]);
+    }
+    header_cells.push("COMMAND");
+    let header = Row::new(header_cells)
         .style(Style::default().add_modifier(Modifier::BOLD | Modifier::REVERSED));
 
     let title = format!(
-        " processes ({}) — sort: {}{} ",
+        " processes ({}) — sort: {}{}{} ",
         rows_data.len(),
         app.sort.label(),
-        if app.tree { " · tree" } else { "" }
+        if app.tree { " · tree" } else { "" },
+        io_status(app, collected, &rows_data)
     );
 
-    let table = Table::new(
-        rows,
-        [
-            Constraint::Length(7),
-            Constraint::Length(10),
-            Constraint::Length(6),
-            Constraint::Length(8),
-            Constraint::Length(2),
-            Constraint::Length(4),
-            Constraint::Min(10),
-        ],
-    )
-    .header(header)
-    .block(bordered(&title));
+    let mut widths = vec![
+        Constraint::Length(7),
+        Constraint::Length(10),
+        Constraint::Length(6),
+        Constraint::Length(8),
+        Constraint::Length(2),
+        Constraint::Length(4),
+    ];
+    if app.show_io {
+        widths.push(Constraint::Length(9));
+        widths.push(Constraint::Length(9));
+    }
+    widths.push(Constraint::Min(10));
+
+    let table = Table::new(rows, widths)
+        .header(header)
+        .block(bordered(&title));
 
     f.render_widget(table, area);
+}
+
+/// One disk-rate cell.
+///
+/// Three distinct states, none of them a zero: `·` for history recorded before
+/// the column was switched on, `—` for a process this user may not read, and a
+/// rate otherwise.
+fn io_cell(collected: bool, io: Option<IoRates>, write: bool) -> Cell<'static> {
+    let dim = Style::default().add_modifier(Modifier::DIM);
+    match (collected, io) {
+        (false, _) => Cell::from("·").style(dim),
+        (true, None) => Cell::from("—").style(dim),
+        (true, Some(io)) => {
+            let bytes = if write { io.write } else { io.read };
+            if bytes == 0 {
+                Cell::from("0").style(dim)
+            } else {
+                Cell::from(format!("{}/s", fmt_bytes(bytes)))
+            }
+        }
+    }
+}
+
+/// Panel-title note about IO availability.
+///
+/// If most processes are unreadable the table would otherwise look broken; this
+/// says why, and implies the fix.
+fn io_status(app: &App, collected: bool, rows: &[crate::tree::TreeRow]) -> String {
+    if !app.show_io {
+        return String::new();
+    }
+    if !collected {
+        return " · io: not collected here".into();
+    }
+    // Only unreadable processes are worth mentioning: a process awaiting its
+    // second reading also shows a dash, but resolves on its own and needs no
+    // action from anyone.
+    let denied = app.history.current().map_or(0, |s| s.io_denied);
+    if denied == 0 {
+        " · io".into()
+    } else {
+        format!(" · io: {denied}/{} need root", rows.len())
+    }
 }
 
 fn draw_help(f: &mut Frame, area: Rect, app: &App) {
@@ -392,7 +449,7 @@ fn draw_help(f: &mut Frame, area: Rect, app: &App) {
         ])
     } else {
         Line::from(Span::styled(
-            "q quit · ←/→ scrub · Space live · Home oldest · ↑/↓ select · s sort · / filter",
+            "q quit · ←/→ scrub · +/- zoom · Space live · ↑/↓ select · s sort · t tree · i io · / filter",
             Style::default().add_modifier(Modifier::DIM),
         ))
     };

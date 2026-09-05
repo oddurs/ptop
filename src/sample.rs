@@ -37,6 +37,13 @@ impl MemStat {
     }
 }
 
+/// Disk throughput for one process over one interval, in bytes per second.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct IoRates {
+    pub read: u64,
+    pub write: u64,
+}
+
 /// One process as it appeared in a single sample.
 #[derive(Debug, Clone)]
 pub struct ProcSample {
@@ -55,6 +62,12 @@ pub struct ProcSample {
     pub rss: u64,
     pub threads: u32,
     pub state: char,
+    /// `None` means no figure is available — either extended collection was off
+    /// when this sample was taken, or the process could not be read. The two
+    /// cases are told apart by [`Sample::io_collected`], and neither is ever
+    /// rendered as a zero: a fabricated zero is indistinguishable from a
+    /// genuinely idle process.
+    pub io: Option<IoRates>,
 }
 
 /// A complete snapshot of the machine at one instant.
@@ -69,6 +82,14 @@ pub struct Sample {
     pub load: [f64; 3],
     pub procs: Vec<ProcSample>,
     pub uptime: std::time::Duration,
+    /// Whether extended per-process IO was being collected when this sample was
+    /// taken. History predating the column being switched on has this false,
+    /// and says so rather than pretending the machine was idle.
+    pub io_collected: bool,
+    /// Processes whose IO file could not be read at all, as opposed to those
+    /// merely awaiting a second reading. Only the former is fixed by running as
+    /// root, so conflating them produces advice that does not help.
+    pub io_denied: usize,
 }
 
 impl Sample {
@@ -84,6 +105,8 @@ impl Sample {
             load: [0.0; 3],
             procs: Vec::new(),
             uptime: std::time::Duration::ZERO,
+            io_collected: false,
+            io_denied: 0,
         }
     }
 }

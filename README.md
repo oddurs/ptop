@@ -40,6 +40,7 @@ cargo build --release
 | `↑` / `↓` | select a process |
 | `s` | cycle sort column |
 | `t` | toggle the process tree |
+| `i` | toggle per-process disk IO columns |
 | `/` | filter by name or pid |
 
 `ptop --once` prints a single plain-text sample and exits, for scripts and cron.
@@ -109,10 +110,37 @@ them:
   terminals that cannot render braille. Any Unicode-dependent drawing needs a
   plain-ASCII path.
 
-Braille rendering, timeline zoom, and the process tree are implemented
-(`src/glyphs.rs`, `History::peak_slots`, `src/tree.rs`). Still to come:
-column-driven collection flags, which should land together with the first
-expensive gated column rather than on their own.
+All three are implemented: braille rendering and timeline zoom
+(`src/glyphs.rs`, `History::peak_slots`), the process tree (`src/tree.rs`), and
+tiered collection (`collect::Needs`).
+
+**Tiered collection.** Core figures — cpu, memory, rss, name, user, state,
+threads — are never gated, because the timeline and the default table depend on
+them and their history has to be complete. Per-process disk IO is gated on the
+column being visible, and it is not cheap: at 400 processes a sample costs
+1.55ms without it and 2.28ms with, since it adds a file read per process.
+
+**Gated collection conflicts with rewindable history** in a way htop never has
+to face — enable IO at t=300 and the first 300 samples have nothing to show when
+you scrub back into them. ptop resolves this by making collection a *ratchet*:
+showing the columns starts collection, hiding them does not stop it. Toggling
+would otherwise punch holes wherever the column happened to be off, and one
+clean boundary is far easier to reason about while scrubbing than several.
+
+Three states are rendered, and **none of them is a zero** — a fabricated zero is
+indistinguishable from a genuinely idle process:
+
+| Shown | Meaning |
+| --- | --- |
+| `·` | history recorded before the column was switched on |
+| `—` | unreadable, or the process is too new to have a second reading yet |
+| `1.2M/s` | a real rate |
+
+`/proc/<pid>/io` is mode `0400` and owned by the process owner, so reading other
+users' processes needs `CAP_SYS_PTRACE`. Only genuinely unreadable processes
+prompt for root; a process merely awaiting its second reading also shows a dash
+but resolves on its own, and conflating the two produces advice that does not
+help.
 
 The tree is a view over `ppid`, which every retained sample already carries, so
 the tree you see while scrubbed back is the real hierarchy from that moment.

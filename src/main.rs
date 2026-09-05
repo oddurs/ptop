@@ -19,7 +19,7 @@ mod ui;
 mod ui_tests;
 
 use app::{App, Sort};
-use collect::{Collector, Platform};
+use collect::{Collector, Needs, Platform};
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use std::io;
 use std::time::{Duration, Instant};
@@ -48,6 +48,7 @@ KEYS:
     Up/Down         select a process
     s               cycle sort column
     t               toggle the process tree
+    i               toggle per-process disk IO columns
     /               filter by name or pid
 ";
 
@@ -88,15 +89,19 @@ fn main() -> io::Result<()> {
     match args.first().map(String::as_str) {
         Some("--once") => return once(&mut collector),
         Some("--bench") => {
-            collector.sample()?;
+            // Measure with extended collection both off and on, so the cost
+            // of gating a column is a number rather than a claim.
             let n = 20;
-            let t0 = std::time::Instant::now();
-            let mut count = 0;
-            for _ in 0..n {
-                count = collector.sample()?.procs.len();
+            for needs in [Needs { io: false }, Needs { io: true }] {
+                collector.sample(needs)?;
+                let t0 = std::time::Instant::now();
+                let mut count = 0;
+                for _ in 0..n {
+                    count = collector.sample(needs)?.procs.len();
+                }
+                let label = if needs.io { "io on " } else { "io off" };
+                println!("{label}: {count} procs, {:?}/sample", t0.elapsed() / n);
             }
-            let per = t0.elapsed() / n;
-            println!("{count} procs, {:?}/sample", per);
             return Ok(());
         }
         Some("--help" | "-h") => {
@@ -119,7 +124,7 @@ fn main() -> io::Result<()> {
 
     // Collect once before drawing so the first frame has real numbers. CPU
     // still reads zero — there is no previous counter to diff against yet.
-    app.push(collector.sample()?);
+    app.push(collector.sample(app.needs())?);
 
     let mut terminal = ratatui::init();
     let result = run(&mut terminal, &mut app, &mut collector);
@@ -132,9 +137,10 @@ fn main() -> io::Result<()> {
 /// Two samples are taken, one interval apart: CPU figures are deltas between
 /// reads, so a single sample could only ever report zero.
 fn once(collector: &mut impl Collector) -> io::Result<()> {
-    collector.sample()?;
+    let needs = Needs { io: true };
+    collector.sample(needs)?;
     std::thread::sleep(SAMPLE_INTERVAL);
-    let s = collector.sample()?;
+    let s = collector.sample(needs)?;
 
     println!(
         "cpu    {:.1}%  ({} cores)",
@@ -158,13 +164,29 @@ fn once(collector: &mut impl Collector) -> io::Result<()> {
     }
     println!("load   {:.2} {:.2} {:.2}", s.load[0], s.load[1], s.load[2]);
     println!("procs  {}", s.procs.len());
+    if s.io_denied > 0 {
+        println!(
+            "io     {}/{} processes unreadable — run as root to see them",
+            s.io_denied,
+            s.procs.len()
+        );
+    }
 
     let mut top = s.procs.clone();
     top.sort_by(|a, b| b.cpu.total_cmp(&a.cpu));
-    println!("\n{:>7}  {:>6}  {:>9}  COMMAND", "PID", "CPU%", "RSS");
+    println!(
+        "\n{:>7}  {:>6}  {:>9}  {:>10}  {:>10}  COMMAND",
+        "PID", "CPU%", "RSS", "DISK R/s", "DISK W/s"
+    );
     for p in top.iter().take(10) {
+        // A dash, never a zero: this process could not be read, which is not
+        // the same as it doing no IO.
+        let (r, w) = match p.io {
+            Some(io) => (human(io.read), human(io.write)),
+            None => ("—".into(), "—".into()),
+        };
         println!(
-            "{:>7}  {:>6.1}  {:>9}  {}",
+            "{:>7}  {:>6.1}  {:>9}  {r:>10}  {w:>10}  {}",
             p.pid,
             p.cpu,
             human(p.rss),
@@ -207,7 +229,7 @@ fn run(
         if last_sample.elapsed() >= SAMPLE_INTERVAL {
             // Sampling continues while paused — that is the whole point. The
             // cursor stays put, the buffer keeps filling behind it.
-            app.push(collector.sample()?);
+            app.push(collector.sample(app.needs())?);
             app.clamp_selection();
             last_sample = Instant::now();
         }
@@ -291,6 +313,7 @@ fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
             app.sort = app.sort.next();
             app.selected = 0;
         }
+        KeyCode::Char('i') => app.toggle_io(),
         KeyCode::Char('t') => {
             app.tree = !app.tree;
             app.selected = 0;

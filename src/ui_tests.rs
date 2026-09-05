@@ -20,6 +20,7 @@ fn proc_named(pid: i32, name: &str, cpu: f32, rss: u64) -> ProcSample {
         rss,
         threads: 1,
         state: 'S',
+        io: None,
     }
 }
 
@@ -48,6 +49,8 @@ fn sample_at(cpu: f32, age_secs: u64) -> Sample {
             proc_named(99, "nginx", 12.5, 32 << 20),
         ],
         uptime: std::time::Duration::from_secs(90_000),
+        io_collected: false,
+        io_denied: 0,
     }
 }
 
@@ -354,7 +357,7 @@ fn show_real_tree() {
     use crate::collect::{Collector, Platform};
     let mut c = Platform::new().unwrap();
     let mut app = App::new(60);
-    app.push(c.sample().unwrap());
+    app.push(c.sample(Default::default()).unwrap());
     app.tree = true;
     app.sort = crate::app::Sort::Pid;
 
@@ -373,4 +376,81 @@ fn show_real_tree() {
     for r in rows.iter().take(28) {
         println!("{:>7} {}{}", r.proc.pid, r.prefix, r.proc.name);
     }
+}
+
+#[test]
+fn io_columns_appear_only_when_asked_for() {
+    let mut app = App::new(60);
+    app.push(sample(10.0));
+    assert!(!render(&app, 120, 30).contains("DISK"));
+    app.toggle_io();
+    assert!(render(&app, 120, 30).contains("DISK"));
+}
+
+#[test]
+fn io_collection_is_a_ratchet() {
+    use crate::collect::Needs;
+    let mut app = App::new(60);
+    assert_eq!(app.needs(), Needs { io: false });
+
+    app.toggle_io();
+    assert_eq!(app.needs(), Needs { io: true });
+
+    // Hiding the columns must NOT stop collection: resuming later would leave
+    // a hole in the middle of history rather than one clean boundary.
+    app.toggle_io();
+    assert!(!app.show_io);
+    assert_eq!(app.needs(), Needs { io: true }, "collection must not stop");
+}
+
+#[test]
+fn history_without_io_says_so_rather_than_showing_zero() {
+    let mut app = App::new(60);
+    let mut old = sample(10.0);
+    old.io_collected = false; // recorded before the column was switched on
+    app.push(old);
+    app.toggle_io();
+
+    let out = render(&app, 120, 30);
+    assert!(out.contains("not collected"), "must explain the blank");
+    assert!(out.contains('·'), "blank marker, never a fabricated 0");
+}
+
+#[test]
+fn unreadable_processes_are_blank_not_zero() {
+    let mut app = App::new(60);
+    let mut s = sample(10.0);
+    s.io_collected = true;
+    s.procs[0].io = Some(crate::sample::IoRates {
+        read: 2048,
+        write: 0,
+    });
+    // procs[1] and [2] stay None: readable by root only.
+    s.io_denied = 2;
+    app.push(s);
+    app.toggle_io();
+
+    let out = render(&app, 120, 30);
+    assert!(out.contains("2.0K/s"), "a real rate renders as a rate");
+    assert!(out.contains('—'), "unreadable renders as a dash");
+    assert!(
+        out.contains("2/3 need root"),
+        "title should explain the dashes"
+    );
+}
+
+#[test]
+fn only_unreadable_processes_prompt_for_root() {
+    // A process merely awaiting its second reading also shows a dash, but it
+    // resolves on its own; blaming permissions for that case would be wrong.
+    let mut app = App::new(60);
+    let mut s = sample(10.0);
+    s.io_collected = true;
+    s.io_denied = 0; // all readable, none has a prior counter yet
+    app.push(s);
+    app.toggle_io();
+
+    let out = render(&app, 120, 30);
+    assert!(out.contains('—'), "no prior reading still shows a dash");
+    assert!(!out.contains("need root"), "but must not blame permissions");
 }

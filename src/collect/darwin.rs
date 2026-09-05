@@ -4,8 +4,8 @@
 //! project's worth of unsafe. This backend exists so the tool runs on a dev
 //! laptop; the `/proc` backend is the one to read for how any of it works.
 
-use super::Collector;
-use crate::sample::{MemStat, ProcSample, Sample};
+use super::{Collector, Needs};
+use crate::sample::{IoRates, MemStat, ProcSample, Sample};
 use std::io;
 use std::time::{Duration, SystemTime};
 use sysinfo::{ProcessesToUpdate, System, Users};
@@ -25,7 +25,7 @@ impl SysinfoCollector {
 }
 
 impl Collector for SysinfoCollector {
-    fn sample(&mut self) -> io::Result<Sample> {
+    fn sample(&mut self, needs: Needs) -> io::Result<Sample> {
         self.sys.refresh_cpu_all();
         self.sys.refresh_memory();
         self.sys.refresh_processes(ProcessesToUpdate::All, true);
@@ -60,6 +60,16 @@ impl Collector for SysinfoCollector {
                 // backend anyway.
                 threads: 1,
                 state: status_char(p.status()),
+                // sysinfo already reports these as bytes since the last
+                // refresh, so unlike the /proc backend there is no counter to
+                // diff here.
+                io: needs.io.then(|| {
+                    let d = p.disk_usage();
+                    IoRates {
+                        read: d.read_bytes,
+                        write: d.written_bytes,
+                    }
+                }),
             })
             .collect();
 
@@ -79,6 +89,10 @@ impl Collector for SysinfoCollector {
             load: [load.one, load.five, load.fifteen],
             procs,
             uptime: Duration::from_secs(System::uptime()),
+            io_collected: needs.io,
+            // sysinfo reports per-refresh deltas directly, so there is no
+            // permission-denied path to count here.
+            io_denied: 0,
         })
     }
 }

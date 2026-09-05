@@ -1,5 +1,6 @@
 //! Application state and input handling.
 
+use crate::collect::Needs;
 use crate::glyphs::GlyphSet;
 use crate::history::History;
 use crate::sample::{ProcSample, Sample};
@@ -78,6 +79,14 @@ pub struct App {
     pub editing_filter: bool,
     pub should_quit: bool,
     pub tree: bool,
+    /// Whether the IO columns are shown.
+    pub show_io: bool,
+    /// Whether IO is being collected. Deliberately a ratchet: hiding the
+    /// columns does not stop collection, because resuming later would punch a
+    /// hole in the middle of history. One clean boundary between "not collected
+    /// yet" and "collected" is far easier to reason about while scrubbing than
+    /// gaps wherever the column happened to be off.
+    io_ratchet: bool,
     /// Index into [`ZOOM_LEVELS`].
     zoom_idx: usize,
     pub glyphs: GlyphSet,
@@ -93,9 +102,25 @@ impl App {
             editing_filter: false,
             should_quit: false,
             tree: false,
+            show_io: false,
+            io_ratchet: false,
             zoom_idx: 0,
             glyphs: GlyphSet::default(),
         }
+    }
+
+    /// What the collector should gather for the next sample.
+    pub fn needs(&self) -> Needs {
+        Needs {
+            io: self.io_ratchet,
+        }
+    }
+
+    /// Show or hide the IO columns. Showing them starts collection; hiding them
+    /// does not stop it. See [`App::io_ratchet`].
+    pub fn toggle_io(&mut self) {
+        self.show_io = !self.show_io;
+        self.io_ratchet |= self.show_io;
     }
 
     /// Samples per display slot.

@@ -4,8 +4,8 @@
 //! a delta between the previous read and this one, which is why the collector
 //! is stateful and why the very first sample reports zero busy time.
 
-use super::Collector;
-use crate::sample::{MemStat, ProcSample, Sample};
+use super::{Collector, Needs};
+use crate::sample::{IoRates, MemStat, ProcSample, Sample};
 use std::collections::HashMap;
 use std::fs;
 use std::io;
@@ -59,6 +59,8 @@ pub struct ProcFs {
     prev_cores: Vec<CpuTimes>,
     /// pid -> cumulative (utime + stime) jiffies at the previous sample.
     prev_proc_jiffies: HashMap<i32, u64>,
+    /// pid -> cumulative (read_bytes, write_bytes) at the previous sample.
+    prev_proc_io: HashMap<i32, (u64, u64)>,
     prev_at: Option<SystemTime>,
     /// uid -> username, parsed once from /etc/passwd.
     users: HashMap<u32, Arc<str>>,
@@ -72,6 +74,7 @@ impl ProcFs {
             prev_total: None,
             prev_cores: Vec::new(),
             prev_proc_jiffies: HashMap::new(),
+            prev_proc_io: HashMap::new(),
             prev_at: None,
             users: parse_passwd(),
             // USER_HZ is fixed at 100 on effectively every Linux build. The
@@ -175,9 +178,15 @@ impl ProcFs {
         Ok(Duration::from_secs_f64(secs))
     }
 
-    fn read_procs(&mut self, elapsed: Duration) -> io::Result<Vec<ProcSample>> {
+    fn read_procs(
+        &mut self,
+        elapsed: Duration,
+        needs: Needs,
+        denied: &mut usize,
+    ) -> io::Result<Vec<ProcSample>> {
         let mut out = Vec::new();
         let mut seen = HashMap::new();
+        let mut seen_io = HashMap::new();
         let elapsed_secs = elapsed.as_secs_f64();
 
         for entry in fs::read_dir("/proc")? {
@@ -201,16 +210,59 @@ impl ProcFs {
             let uid = entry.metadata().map(|m| m.uid()).unwrap_or(0);
             let user = self.user_for_uid(uid);
 
-            let Some(p) = self.parse_proc_stat(pid, &stat, elapsed_secs, user, &mut seen) else {
+            let Some(mut p) = self.parse_proc_stat(pid, &stat, elapsed_secs, user, &mut seen)
+            else {
                 continue;
             };
+            if needs.io {
+                match self.read_proc_io(pid, elapsed_secs, &mut seen_io) {
+                    Ok(rates) => p.io = rates,
+                    Err(()) => *denied += 1,
+                }
+            }
             out.push(p);
         }
 
         // Drop counters for processes that have exited, or the map grows
         // without bound on a busy box.
         self.prev_proc_jiffies = seen;
+        if needs.io {
+            self.prev_proc_io = seen_io;
+        }
         Ok(out)
+    }
+
+    /// Per-process disk throughput from `/proc/<pid>/io`.
+    ///
+    /// That file is mode 0400 and owned by the process owner, so reading
+    /// another user's process needs CAP_SYS_PTRACE. Unreadable means `None`,
+    /// never zero — showing every process you do not own as idle would be a
+    /// confident lie, where a blank is merely an absence.
+    /// `Err(())` means the file could not be read — running as root would fix
+    /// it. `Ok(None)` means the process is simply too new to have a previous
+    /// counter to diff against, which fixes itself on the next sample. Both
+    /// render as a dash, but only one of them is worth advising the user about.
+    fn read_proc_io(
+        &self,
+        pid: i32,
+        elapsed_secs: f64,
+        seen: &mut HashMap<i32, (u64, u64)>,
+    ) -> Result<Option<IoRates>, ()> {
+        let text = fs::read_to_string(format!("/proc/{pid}/io")).map_err(|_| ())?;
+        let (read, write) = parse_proc_io(&text).ok_or(())?;
+        seen.insert(pid, (read, write));
+
+        // Cumulative counters again: only the delta is a rate.
+        let Some((prev_r, prev_w)) = self.prev_proc_io.get(&pid).copied() else {
+            return Ok(None);
+        };
+        if elapsed_secs <= 0.0 {
+            return Ok(None);
+        }
+        Ok(Some(IoRates {
+            read: ((read.saturating_sub(prev_r)) as f64 / elapsed_secs) as u64,
+            write: ((write.saturating_sub(prev_w)) as f64 / elapsed_secs) as u64,
+        }))
     }
 
     fn user_for_uid(&mut self, uid: u32) -> Arc<str> {
@@ -272,6 +324,7 @@ impl ProcFs {
             rss: rss_pages * self.page_size,
             threads,
             state,
+            io: None,
         })
     }
 
@@ -279,6 +332,24 @@ impl ProcFs {
     fn core_count(&self) -> usize {
         self.prev_cores.len().max(1)
     }
+}
+
+/// Cumulative block-layer bytes from `/proc/<pid>/io`.
+///
+/// `read_bytes`/`write_bytes` are actual device traffic, which is what iotop
+/// reports; `rchar`/`wchar` count bytes passed to syscalls and include reads
+/// served from page cache, which would overstate disk load considerably.
+fn parse_proc_io(text: &str) -> Option<(u64, u64)> {
+    let mut read = None;
+    let mut write = None;
+    for line in text.lines() {
+        if let Some(v) = line.strip_prefix("read_bytes:") {
+            read = v.trim().parse().ok();
+        } else if let Some(v) = line.strip_prefix("write_bytes:") {
+            write = v.trim().parse().ok();
+        }
+    }
+    Some((read?, write?))
 }
 
 /// uid -> name, from /etc/passwd. Good enough without NSS; unknown uids fall
@@ -300,7 +371,7 @@ fn parse_passwd() -> HashMap<u32, Arc<str>> {
 }
 
 impl Collector for ProcFs {
-    fn sample(&mut self) -> io::Result<Sample> {
+    fn sample(&mut self, needs: Needs) -> io::Result<Sample> {
         let now = SystemTime::now();
         let elapsed = self
             .prev_at
@@ -309,14 +380,18 @@ impl Collector for ProcFs {
         self.prev_at = Some(now);
 
         let (cpu_total, cpu_per_core) = self.read_cpu()?;
+        let mut io_denied = 0;
+        let procs = self.read_procs(elapsed, needs, &mut io_denied)?;
         Ok(Sample {
             at: now,
             cpu_total,
             cpu_per_core,
             mem: self.read_mem()?,
             load: self.read_load()?,
-            procs: self.read_procs(elapsed)?,
+            procs,
             uptime: self.read_uptime()?,
+            io_collected: needs.io,
+            io_denied,
         })
     }
 }
@@ -384,6 +459,26 @@ mod tests {
             .unwrap();
         assert_eq!(p.cpu, 0.0);
         assert_eq!(seen.get(&1), Some(&100)); // 55 + 45 recorded for next time
+    }
+
+    #[test]
+    fn parses_block_layer_bytes_not_syscall_bytes() {
+        let text = "rchar: 999\nwchar: 888\nsyscr: 7\nsyscw: 3\n\
+                    read_bytes: 4096\nwrite_bytes: 8192\ncancelled_write_bytes: 512\n";
+        assert_eq!(parse_proc_io(text), Some((4096, 8192)));
+    }
+
+    #[test]
+    fn io_parse_rejects_a_truncated_file() {
+        assert_eq!(parse_proc_io("rchar: 1\nwchar: 2\n"), None);
+    }
+
+    #[test]
+    fn io_rate_needs_a_previous_reading() {
+        let pf = ProcFs::new().unwrap();
+        let mut seen = HashMap::new();
+        // A pid that cannot be read is Err — the case root would fix.
+        assert!(pf.read_proc_io(-1, 1.0, &mut seen).is_err());
     }
 
     #[test]
