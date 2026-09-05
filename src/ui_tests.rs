@@ -1126,3 +1126,142 @@ fn readme_frame() {
         println!("{}", row.trim_end());
     }
 }
+
+/// The whole timeline panel as text, one string per row.
+fn timeline_rows(app: &App, w: u16, h: u16) -> Vec<String> {
+    let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
+    term.draw(|f| ui::draw_timeline_for_test(f, f.area(), app))
+        .unwrap();
+    let buf = term.backend().buffer();
+    (0..h)
+        .map(|y| (0..w).map(|x| buf[(x, y)].symbol()).collect::<String>())
+        .collect()
+}
+
+#[test]
+fn the_cursor_reports_the_values_at_the_cursor_not_the_live_ones() {
+    // The whole point of the readout. If it showed the newest sample it would
+    // contradict the process table beside it, which does follow the cursor.
+    let mut app = App::new(600);
+    // Oldest 90%, newest 10%, so the two are impossible to confuse.
+    for i in (0..40).rev() {
+        app.push(sample_at(if i > 20 { 90.0 } else { 10.0 }, i));
+    }
+    app.theme = Theme::new(Palette::Safe, Tier::TrueColor);
+    app.history.scrub(-35); // back into the 90% region
+
+    let text = timeline_rows(&app, 100, 12).join("\n");
+    assert!(
+        text.contains("CPU 90.0%"),
+        "readout shows the live value, not the cursor's:\n{text}"
+    );
+    assert!(!text.contains("CPU 10.0%"));
+}
+
+#[test]
+fn the_readout_is_absent_while_live() {
+    let mut app = App::new(600);
+    for i in (0..40).rev() {
+        app.push(sample_at(50.0, i));
+    }
+    app.theme = Theme::new(Palette::Safe, Tier::TrueColor);
+
+    let live = timeline_rows(&app, 100, 12).join("\n");
+    assert!(!live.contains("CPU 50.0%"), "readout shown while live");
+    assert!(live.contains("past"), "live row should show the time axis");
+
+    app.history.scrub(-5);
+    assert!(
+        timeline_rows(&app, 100, 12)
+            .join("\n")
+            .contains("CPU 50.0%")
+    );
+}
+
+#[test]
+fn the_readout_never_pushes_the_marker_off_its_column() {
+    // Asserting `row.len() == w` cannot fail: TestBackend is a fixed grid
+    // pre-filled with spaces and ratatui truncates an over-wide line, so an
+    // overflowing row measures `w` either way. The observable consequence of
+    // overflow is the marker sliding, so assert the marker's column directly.
+    for w in [40u16, 60, 80, 100, 140] {
+        for back in [1usize, 5, 20, 60] {
+            let n = 80usize;
+            let mut app = App::new(600);
+            for i in (0..n).rev() {
+                app.push(sample_at(50.0, i as u64));
+            }
+            app.theme = Theme::new(Palette::Safe, Tier::TrueColor);
+            app.history.scrub(-(back as isize));
+
+            let gutter = if (w as usize - 2) >= 30 { 4 } else { 0 };
+            let graph_w = (w as usize - 2) - gutter;
+            let spc = app.glyphs.samples_per_cell();
+            let slots = graph_w * spc;
+            let zoom = crate::app::effective_zoom(app.zoom(), n, slots);
+            let shown = (slots * zoom).min(n);
+            let dropped = app.history.len() - shown;
+            if app.history.cursor_index() < dropped {
+                continue; // off-window: covered by its own test
+            }
+            let idx = app.history.cursor_index() - dropped;
+            let slot = crate::history::slot_of_index(idx, shown, zoom, slots);
+            let expected = 1 + gutter as u16 + (slot / spc) as u16;
+
+            assert_eq!(
+                cursor_column(&app, w, 12),
+                Some(expected),
+                "w={w} back={back}: readout displaced the marker"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_cursor_older_than_the_window_states_nothing_it_cannot_show() {
+    // Home, on a buffer longer than the panel is wide. The marker pins to the
+    // left edge because there is nowhere truthful to put it; printing the
+    // off-screen sample's figures beside it would contradict the column it
+    // points at.
+    let mut app = App::new(600);
+    for i in (0..500).rev() {
+        // Oldest region distinctly different, so a leak is unmistakable.
+        app.push(sample_at(if i > 400 { 11.0 } else { 88.0 }, i as u64));
+    }
+    app.theme = Theme::new(Palette::Safe, Tier::TrueColor);
+    app.history.goto_oldest();
+
+    let text = timeline_rows(&app, 100, 12).join("\n");
+    assert!(
+        !text.contains("CPU 11.0%"),
+        "readout claims an off-screen sample:\n{text}"
+    );
+    assert!(
+        text.contains('◀'),
+        "cursor is off-window but nothing says so:\n{text}"
+    );
+}
+
+#[test]
+fn the_readout_flips_side_rather_than_being_clipped() {
+    // With the cursor at the newest sample the marker sits at the right edge,
+    // so the text has to go to its left.
+    let mut app = App::new(600);
+    for i in (0..20).rev() {
+        app.push(sample_at(77.0, i));
+    }
+    app.theme = Theme::new(Palette::Safe, Tier::TrueColor);
+    app.history.scrub(-1);
+
+    let rows = timeline_rows(&app, 100, 12);
+    let cursor_row = rows
+        .iter()
+        .find(|r| r.contains('▌') || r.contains('▐'))
+        .expect("cursor row");
+    let marker = cursor_row.find(['▌', '▐']).unwrap();
+    let text = cursor_row.find("CPU 77.0%").expect("readout missing");
+    assert!(
+        text < marker,
+        "readout should sit left of a right-edge cursor: {cursor_row:?}"
+    );
+}
