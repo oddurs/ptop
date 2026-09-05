@@ -64,6 +64,35 @@ If you are running a fleet and want history you can rely on after the fact,
 install atop. If you want to know what this box is doing right now and what it
 was doing a few minutes ago, that is what ptop is for.
 
+|                                        | ptop | htop | btop | bottom | zenith | atop |
+| -------------------------------------- | :--: | :--: | :--: | :----: | :----: | :--: |
+| Live view                              |  ●   |  ●   |  ●   |   ●    |   ●    |  ●   |
+| Rolling graph of recent values         |  ●   |  ◐¹  |  ●   |   ●    |   ●    |  ○   |
+| Move backwards through time            |  ●   |  ○   |  ○   |   ◐²   |   ●    |  ●³  |
+| Process table follows the time cursor  |  ●   |  ○   |  ○   |   ○    |   ○⁴   |  ●   |
+| Captures processes that exited between samples | ○ | ○ | ○ |   ○    |   ○    |  ●   |
+| History survives a restart             |  ○   |  ○   |  ○   |   ○    |   ●    |  ●   |
+| Needs something running beforehand     |  ○   |  ○   |  ○   |   ○    |   ○    |  ●⁵  |
+
+● yes · ◐ partial · ○ no
+
+1. htop's Graph meter mode (`GRAPH_METERMODE`, `Meter.c`) keeps a rolling
+   scalar buffer sized to the meter width. It is a graph, not navigable
+   history, and it is per-meter rather than per-process.
+2. bottom can freeze the display (`f`), but freezing gates the update
+   (`if !app.data_store.is_frozen()`, `lib.rs`) rather than letting you look
+   backwards. ptop keeps sampling while you scrub.
+3. atop steps through intervals when replaying a logfile (`atop -r`), which is
+   a separate mode rather than the live view.
+4. zenith's `HistogramKind` holds only aggregate series; its process table
+   renders from a live map that runs
+   `.retain(|&k, _| current_pids.contains(&k))`.
+5. atop's history requires its daemon to have been recording in advance. This
+   row is the whole of ptop's argument.
+
+Every cell above was checked against the tool's source or official
+documentation rather than from memory; the footnotes name where.
+
 ## Build
 
 ```sh
