@@ -7,6 +7,7 @@ use crate::app::{self, App};
 use crate::glyphs::{self, GlyphSet};
 use crate::history;
 use crate::sample::{IoRates, Sample};
+use crate::theme::Theme;
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, Cell, Paragraph, Row, Table};
 use std::time::Duration;
@@ -33,7 +34,7 @@ pub fn draw(f: &mut Frame, app: &App) {
     };
 
     draw_header(f, chunks[0], app, sample);
-    draw_cores(f, chunks[1], sample);
+    draw_cores(f, chunks[1], sample, &app.theme);
     draw_timeline(f, chunks[2], app);
     draw_procs(f, chunks[3], app);
     draw_help(f, chunks[4], app);
@@ -41,16 +42,6 @@ pub fn draw(f: &mut Frame, app: &App) {
 
 fn bordered(title: &str) -> Block<'_> {
     Block::default().borders(Borders::ALL).title(title)
-}
-
-/// Green below 50%, yellow to 80%, red above. Same scale everywhere so a colour
-/// means the same thing in the meters and in the timeline.
-fn heat(pct: f32) -> Color {
-    match pct {
-        p if p >= 80.0 => Color::Red,
-        p if p >= 50.0 => Color::Yellow,
-        _ => Color::Green,
-    }
 }
 
 fn fmt_bytes(b: u64) -> String {
@@ -95,7 +86,7 @@ fn draw_header(f: &mut Frame, area: Rect, app: &App, s: &Sample) {
         Span::styled(
             format!("{:>5.1}%", s.cpu_total),
             Style::default()
-                .fg(heat(s.cpu_total))
+                .fg(app.theme.heat(s.cpu_total))
                 .add_modifier(Modifier::BOLD),
         ),
         Span::raw("   "),
@@ -103,7 +94,7 @@ fn draw_header(f: &mut Frame, area: Rect, app: &App, s: &Sample) {
         Span::styled(
             format!("{:>5.1}%", mem_pct),
             Style::default()
-                .fg(heat(mem_pct))
+                .fg(app.theme.heat(mem_pct))
                 .add_modifier(Modifier::BOLD),
         ),
         Span::styled(
@@ -124,7 +115,7 @@ fn draw_header(f: &mut Frame, area: Rect, app: &App, s: &Sample) {
         ));
         spans.push(Span::styled(
             format!("{:>5.1}%", s.mem.swap_pct()),
-            Style::default().fg(heat(s.mem.swap_pct())),
+            Style::default().fg(app.theme.heat(s.mem.swap_pct())),
         ));
     }
 
@@ -144,7 +135,7 @@ fn draw_header(f: &mut Frame, area: Rect, app: &App, s: &Sample) {
         Span::styled(
             " ptop — LIVE ",
             Style::default()
-                .fg(Color::Green)
+                .fg(app.theme.live)
                 .add_modifier(Modifier::BOLD),
         )
     } else {
@@ -153,8 +144,8 @@ fn draw_header(f: &mut Frame, area: Rect, app: &App, s: &Sample) {
         Span::styled(
             format!(" ptop — PAUSED  -{} ", fmt_lag(app.history.time_behind())),
             Style::default()
-                .fg(Color::Black)
-                .bg(Color::Yellow)
+                .fg(app.theme.cursor_fg)
+                .bg(app.theme.cursor)
                 .add_modifier(Modifier::BOLD),
         )
     };
@@ -166,7 +157,7 @@ fn draw_header(f: &mut Frame, area: Rect, app: &App, s: &Sample) {
     );
 }
 
-fn draw_cores(f: &mut Frame, area: Rect, s: &Sample) {
+fn draw_cores(f: &mut Frame, area: Rect, s: &Sample, theme: &Theme) {
     if s.cpu_per_core.is_empty() {
         return;
     }
@@ -177,7 +168,7 @@ fn draw_cores(f: &mut Frame, area: Rect, s: &Sample) {
         .flat_map(|&pct| {
             let idx = ((pct / 100.0 * 7.0).round() as usize).min(7);
             [
-                Span::styled(BARS[idx].to_string(), Style::default().fg(heat(pct))),
+                Span::styled(BARS[idx].to_string(), Style::default().fg(theme.heat(pct))),
                 Span::raw(" "),
             ]
         })
@@ -230,7 +221,7 @@ fn draw_timeline(f: &mut Frame, area: Rect, app: &App) {
     let mut lines: Vec<Line> = Vec::with_capacity(inner_h);
     for (values, rows) in [(&cpu_slots, cpu_rows), (&mem_slots, mem_rows)] {
         for row in 0..rows {
-            lines.push(glyph_row(app.glyphs, values, row, rows, spc));
+            lines.push(glyph_row(app.glyphs, values, row, rows, spc, &app.theme));
         }
     }
 
@@ -260,6 +251,7 @@ fn glyph_row(
     row: usize,
     rows: usize,
     spc: usize,
+    theme: &Theme,
 ) -> Line<'static> {
     let spans = values
         .chunks(spc)
@@ -272,7 +264,7 @@ fn glyph_row(
             let peak = pcts.iter().copied().fold(0.0_f32, f32::max);
             Span::styled(
                 set.glyph(left, right).to_string(),
-                Style::default().fg(heat(peak)),
+                Style::default().fg(theme.heat(peak)),
             )
         })
         .collect::<Vec<_>>();
@@ -311,7 +303,7 @@ fn cursor_row(
     Line::from(Span::styled(
         row.into_iter().collect::<String>(),
         Style::default()
-            .fg(Color::Yellow)
+            .fg(app.theme.cursor)
             .add_modifier(Modifier::BOLD),
     ))
 }
@@ -333,7 +325,9 @@ fn draw_procs(f: &mut Frame, area: Rect, app: &App) {
             let p = r.proc;
             let mut style = Style::default();
             if i == app.selected {
-                style = style.bg(Color::DarkGray).add_modifier(Modifier::BOLD);
+                style = style
+                    .bg(app.theme.selection_bg)
+                    .add_modifier(Modifier::BOLD);
             } else if r.context_only {
                 // Present only as an ancestor of a filter match: visible for
                 // parentage, but clearly not itself a hit.
@@ -342,7 +336,8 @@ fn draw_procs(f: &mut Frame, area: Rect, app: &App) {
             let mut cells = vec![
                 Cell::from(p.pid.to_string()),
                 Cell::from(p.user.to_string()),
-                Cell::from(format!("{:.1}", p.cpu)).style(Style::default().fg(heat(p.cpu))),
+                Cell::from(format!("{:.1}", p.cpu))
+                    .style(Style::default().fg(app.theme.heat(p.cpu))),
                 Cell::from(fmt_bytes(p.rss)),
                 Cell::from(p.state.to_string()),
                 Cell::from(p.threads.to_string()),
@@ -439,9 +434,9 @@ fn io_status(app: &App, collected: bool, rows: &[crate::tree::TreeRow]) -> Strin
 fn draw_help(f: &mut Frame, area: Rect, app: &App) {
     let line = if app.editing_filter {
         Line::from(vec![
-            Span::styled("filter: ", Style::default().fg(Color::Yellow)),
+            Span::styled("filter: ", Style::default().fg(app.theme.cursor)),
             Span::raw(&app.filter),
-            Span::styled("█", Style::default().fg(Color::Yellow)),
+            Span::styled("█", Style::default().fg(app.theme.cursor)),
             Span::styled(
                 "   (Enter/Esc to finish)",
                 Style::default().add_modifier(Modifier::DIM),

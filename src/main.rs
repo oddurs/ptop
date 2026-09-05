@@ -12,6 +12,7 @@ mod collect;
 mod glyphs;
 mod history;
 mod sample;
+mod theme;
 mod tree;
 mod ui;
 
