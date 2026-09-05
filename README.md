@@ -151,6 +151,20 @@ process orphaned between samples becomes a root rather than disappearing.
 own, so about a third of pids arrive with `ppid = 0` and appear as roots. The
 `/proc` backend has real parentage for everything.
 
+## Roadmap
+
+Granular, evidence-backed items live in [`docs/roadmaps/`](docs/roadmaps/),
+derived from reading the prior art (htop, btop, bottom, zenith, atop) and
+auditing this UI against data-visualisation practice. Start with
+[the index](docs/roadmaps/README.md).
+
+Note that [`docs/roadmaps/00-positioning.md`](docs/roadmaps/00-positioning.md)
+records a correction: **atop already does historical per-process replay**, and
+better than ptop in one important respect — it captures processes that exited
+between samples, which ptop cannot yet see. What is left is a usability
+position, not a capability one. The claims elsewhere in this README are being
+revised accordingly.
+
 ## Status
 
 Early. What works: both backends, the timeline and scrubbing, sorting,
