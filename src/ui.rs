@@ -23,6 +23,10 @@ pub const CORES_H: u16 = 3;
 pub const TIMELINE_H: u16 = 10;
 
 /// Rows occupied by the timeline panel, borders included.
+///
+/// Test-only: it exists so a test can locate the panel from the same constants
+/// the renderer lays out with, rather than copying them into a comment.
+#[cfg(test)]
 pub fn timeline_rows_range() -> std::ops::Range<u16> {
     let top = HEADER_H + CORES_H;
     top..top + TIMELINE_H
