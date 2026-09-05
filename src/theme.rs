@@ -79,6 +79,39 @@ impl Tier {
     }
 }
 
+/// Which set of hues to use. Orthogonal to [`Tier`], which is how many colours
+/// the terminal can render.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Palette {
+    /// Cyan / amber / red. The default.
+    ///
+    /// Green-and-red is the worst available pair for red-green colour vision
+    /// deficiency, which affects roughly 8% of men — and every system monitor
+    /// ships it. Measured against a dark surface in OKLab ΔE×100 under Machado
+    /// 2009 simulation, ptop's old green↔yellow separated by **3.7** under
+    /// protanopia. Replacing green with cyan takes the worst pair to 16.2.
+    #[default]
+    Safe,
+    /// The green / yellow / red every other monitor uses.
+    ///
+    /// Kept because green-means-good is a strong convention and breaking it has
+    /// a real cost for the majority who can see it. This is the escape hatch,
+    /// not the default — and the monochrome tier matters more than either
+    /// choice, since a display legible only in colour cannot be fixed by
+    /// picking better hues.
+    Classic,
+}
+
+impl Palette {
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "safe" => Some(Self::Safe),
+            "classic" => Some(Self::Classic),
+            _ => None,
+        }
+    }
+}
+
 /// Named colours, grouped by the job each one does.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Theme {
@@ -99,8 +132,12 @@ pub struct Theme {
     pub text_dim: Color,
 
     // Interaction.
-    pub cursor: Color,
-    pub cursor_fg: Color,
+    //
+    // There is deliberately no cursor colour. Attention affordances use reverse
+    // video at every tier: it needs no hue (the five meaning-bearing ones are
+    // already spoken for), and it is the only emphasis that survives both a
+    // light and a dark terminal — which an ANSI slot cannot promise, since the
+    // user's theme chooses it.
     pub selection_bg: Color,
     pub live: Color,
 }
@@ -110,12 +147,84 @@ impl Theme {
     pub const CRITICAL_PCT: f32 = 80.0;
 
     /// The palette for a tier.
-    pub fn new(tier: Tier) -> Self {
-        match tier {
-            Tier::Mono => Self::mono(),
-            Tier::Ansi16 => Self::ansi16(),
-            Tier::Ansi256 => Self::indexed(),
-            Tier::TrueColor => Self::truecolor(),
+    /// Monochrome ignores the palette entirely — there are no hues to choose
+    /// between — which is the clearest statement that meaning never rests on
+    /// colour here.
+    pub fn new(palette: Palette, tier: Tier) -> Self {
+        match (palette, tier) {
+            (_, Tier::Mono) => Self::mono(),
+            (Palette::Safe, Tier::Ansi16) => Self::safe_ansi16(),
+            (Palette::Safe, Tier::Ansi256) => Self::safe_indexed(),
+            (Palette::Safe, Tier::TrueColor) => Self::safe_truecolor(),
+            (Palette::Classic, Tier::Ansi16) => Self::ansi16(),
+            (Palette::Classic, Tier::Ansi256) => Self::indexed(),
+            (Palette::Classic, Tier::TrueColor) => Self::truecolor(),
+        }
+    }
+
+    /// Colour-vision-safe on ANSI slots. `LightBlue` rather than `Blue`: plain
+    /// ANSI blue is the lowest-contrast slot against black on most themes.
+    const fn safe_ansi16() -> Self {
+        Self {
+            tier: Tier::Ansi16,
+            ok: Color::Cyan,
+            warn: Color::Yellow,
+            critical: Color::Red,
+            series_cpu: Color::LightBlue,
+            series_mem: Color::Magenta,
+            chrome: Color::DarkGray,
+            text: Color::Reset,
+            text_dim: Color::DarkGray,
+            selection_bg: Color::DarkGray,
+            live: Color::Cyan,
+        }
+    }
+
+    /// Colour-vision-safe, quantised onto the xterm 256 cube.
+    const fn safe_indexed() -> Self {
+        Self {
+            tier: Tier::Ansi256,
+            ok: Color::Indexed(80),
+            warn: Color::Indexed(222),
+            critical: Color::Indexed(203),
+            series_cpu: Color::Indexed(104),
+            series_mem: Color::Indexed(139),
+            chrome: Color::Indexed(239),
+            text: Color::Indexed(252),
+            text_dim: Color::Indexed(244),
+            selection_bg: Color::Indexed(237),
+            live: Color::Indexed(80),
+        }
+    }
+
+    /// Colour-vision-safe, at full precision. These are the measured values.
+    ///
+    /// All ten pairs among the five meaning-bearing hues separate by at least
+    /// **ΔE 10.3** (worst: `critical` ↔ `series_mem`) under Machado 2009
+    /// simulation at severity 1.0, in OKLab ×100, against a target of 8.
+    ///
+    /// The model is named on purpose. An independent check using Viénot 1999
+    /// put an earlier candidate at 7.95 where Machado gave 9.1, so a figure
+    /// quoted without its model is not reproducible. `series_cpu` was moved to
+    /// indigo specifically to widen its gap from the cyan `ok` token — 9.1 to
+    /// 20.0 — so the palette clears the threshold under either model instead of
+    /// sitting on it.
+    ///
+    /// C4 turns this comment into an enforced test. Until then it is a claim,
+    /// not an invariant.
+    const fn safe_truecolor() -> Self {
+        Self {
+            tier: Tier::TrueColor,
+            ok: Color::Rgb(0x5c, 0xcf, 0xe6),
+            warn: Color::Rgb(0xff, 0xd5, 0x80),
+            critical: Color::Rgb(0xff, 0x66, 0x66),
+            series_cpu: Color::Rgb(0x7a, 0x7a, 0xe6),
+            series_mem: Color::Rgb(0xb4, 0x8e, 0xad),
+            chrome: Color::Rgb(0x50, 0x50, 0x50),
+            text: Color::Rgb(0xcc, 0xcc, 0xcc),
+            text_dim: Color::Rgb(0x80, 0x80, 0x80),
+            selection_bg: Color::Rgb(0x3a, 0x3a, 0x3a),
+            live: Color::Rgb(0x5c, 0xcf, 0xe6),
         }
     }
 
@@ -132,8 +241,6 @@ impl Theme {
             chrome: Color::Reset,
             text: Color::Reset,
             text_dim: Color::Reset,
-            cursor: Color::Reset,
-            cursor_fg: Color::Reset,
             selection_bg: Color::Reset,
             live: Color::Reset,
         }
@@ -151,8 +258,6 @@ impl Theme {
             chrome: Color::DarkGray,
             text: Color::Reset,
             text_dim: Color::DarkGray,
-            cursor: Color::Yellow,
-            cursor_fg: Color::Black,
             selection_bg: Color::DarkGray,
             live: Color::Green,
         }
@@ -175,8 +280,6 @@ impl Theme {
             chrome: Color::Indexed(239),
             text: Color::Indexed(252),
             text_dim: Color::Indexed(244),
-            cursor: Color::Indexed(222),
-            cursor_fg: Color::Indexed(234),
             selection_bg: Color::Indexed(237),
             live: Color::Indexed(114),
         }
@@ -202,8 +305,6 @@ impl Theme {
             chrome: Color::Rgb(0x50, 0x50, 0x50),
             text: Color::Rgb(0xcc, 0xcc, 0xcc),
             text_dim: Color::Rgb(0x80, 0x80, 0x80),
-            cursor: Color::Rgb(0xff, 0xd5, 0x80),
-            cursor_fg: Color::Rgb(0x1a, 0x1a, 0x19),
             selection_bg: Color::Rgb(0x3a, 0x3a, 0x3a),
             live: Color::Rgb(0x77, 0xca, 0x9b),
         }
@@ -252,13 +353,12 @@ impl Theme {
 
     /// The PAUSED badge. Loud on purpose in every tier: reading a stale process
     /// table as the current one is the worst thing this tool could allow.
+    /// Reverse video rather than a colour pair: a white-on-something badge
+    /// disappears on a light terminal, and no ANSI slot is safe on both.
     pub fn paused_style(&self) -> Style {
-        let base = Style::default().add_modifier(Modifier::BOLD);
-        if self.tier.has_color() {
-            base.fg(self.cursor_fg).bg(self.cursor)
-        } else {
-            base.add_modifier(Modifier::REVERSED)
-        }
+        Style::default()
+            .add_modifier(Modifier::BOLD)
+            .add_modifier(Modifier::REVERSED)
     }
 
     pub fn live_style(&self) -> Style {
@@ -286,12 +386,9 @@ impl Theme {
 
     /// The scrub cursor. Its glyph already distinguishes it; this is emphasis.
     pub fn cursor_style(&self) -> Style {
-        let base = Style::default().add_modifier(Modifier::BOLD);
-        if self.tier.has_color() {
-            base.fg(self.cursor)
-        } else {
-            base
-        }
+        Style::default()
+            .add_modifier(Modifier::BOLD)
+            .add_modifier(Modifier::REVERSED)
     }
 
     /// Recessive text: labels, legends, the help line.
@@ -312,7 +409,7 @@ impl Theme {
 
 impl Default for Theme {
     fn default() -> Self {
-        Self::new(Tier::default())
+        Self::new(Palette::default(), Tier::default())
     }
 }
 
@@ -322,7 +419,7 @@ mod tests {
 
     #[test]
     fn heat_thresholds_are_inclusive_at_the_boundary() {
-        let t = Theme::new(Tier::Ansi16);
+        let t = Theme::new(Palette::Classic, Tier::Ansi16);
         assert_eq!(t.heat(0.0), t.ok);
         assert_eq!(t.heat(49.9), t.ok);
         assert_eq!(t.heat(50.0), t.warn);
@@ -335,7 +432,7 @@ mod tests {
     fn heat_handles_values_outside_the_nominal_range() {
         // Per-process CPU exceeds 100 on threaded processes, and a NaN would
         // fall through every comparison arm.
-        let t = Theme::new(Tier::Ansi16);
+        let t = Theme::new(Palette::Classic, Tier::Ansi16);
         assert_eq!(t.heat(400.0), t.critical);
         assert_eq!(t.heat(-1.0), t.ok);
         assert_eq!(t.heat(f32::NAN), t.ok);
@@ -343,7 +440,7 @@ mod tests {
 
     #[test]
     fn mono_tier_names_no_colour_at_all() {
-        let t = Theme::new(Tier::Mono);
+        let t = Theme::new(Palette::Classic, Tier::Mono);
         for c in [
             t.ok,
             t.warn,
@@ -353,8 +450,6 @@ mod tests {
             t.chrome,
             t.text,
             t.text_dim,
-            t.cursor,
-            t.cursor_fg,
             t.selection_bg,
             t.live,
         ] {
@@ -366,7 +461,7 @@ mod tests {
     fn mono_still_separates_every_severity() {
         // The point of the tier: without colour, the three states must still be
         // three distinct styles, or meaning is carried by colour alone.
-        let t = Theme::new(Tier::Mono);
+        let t = Theme::new(Palette::Classic, Tier::Mono);
         let ok = t.heat_style(10.0);
         let warn = t.heat_style(60.0);
         let crit = t.heat_style(90.0);
@@ -379,7 +474,7 @@ mod tests {
     fn mono_severity_ordering_survives_greyscale() {
         // Heavier means worse. The hues cannot do this — yellow is lighter than
         // green and red darker than both — so the modifier ordering carries it.
-        let t = Theme::new(Tier::Mono);
+        let t = Theme::new(Palette::Classic, Tier::Mono);
         assert!(t.heat_style(90.0).add_modifier.contains(Modifier::BOLD));
         assert!(t.heat_style(10.0).add_modifier.contains(Modifier::DIM));
     }
@@ -388,7 +483,7 @@ mod tests {
     fn mono_figure_style_keeps_all_three_severities_apart() {
         // The bug this guards: composing heat_style with an unconditional bold
         // made warn and critical identical without colour.
-        let t = Theme::new(Tier::Mono);
+        let t = Theme::new(Palette::Classic, Tier::Mono);
         let styles = [
             t.figure_style(10.0),
             t.figure_style(60.0),
@@ -403,7 +498,7 @@ mod tests {
 
     #[test]
     fn coloured_figures_are_bold_and_hued() {
-        let t = Theme::new(Tier::TrueColor);
+        let t = Theme::new(Palette::Classic, Tier::TrueColor);
         let s = t.figure_style(90.0);
         assert!(s.add_modifier.contains(Modifier::BOLD));
         assert_eq!(s.fg, Some(t.critical));
@@ -411,7 +506,7 @@ mod tests {
 
     #[test]
     fn mono_keeps_paused_and_selection_distinguishable() {
-        let t = Theme::new(Tier::Mono);
+        let t = Theme::new(Palette::Classic, Tier::Mono);
         assert!(
             t.paused_style().add_modifier.contains(Modifier::REVERSED),
             "paused must stay loud without colour"
@@ -426,11 +521,21 @@ mod tests {
     }
 
     #[test]
-    fn coloured_tiers_use_colour_not_reverse_video() {
-        for tier in [Tier::Ansi16, Tier::Ansi256, Tier::TrueColor] {
-            let t = Theme::new(tier);
-            assert!(!t.paused_style().add_modifier.contains(Modifier::REVERSED));
-            assert!(t.paused_style().bg.is_some());
+    fn attention_affordances_use_reverse_video_at_every_tier() {
+        // Not a colour pair: white-on-something vanishes on a light terminal,
+        // and an ANSI slot is whatever the user's theme says it is.
+        for palette in [Palette::Safe, Palette::Classic] {
+            for tier in [Tier::Mono, Tier::Ansi16, Tier::Ansi256, Tier::TrueColor] {
+                let t = Theme::new(palette, tier);
+                assert!(
+                    t.paused_style().add_modifier.contains(Modifier::REVERSED),
+                    "{palette:?}/{tier:?}: PAUSED badge is not reverse video"
+                );
+                assert!(
+                    t.cursor_style().add_modifier.contains(Modifier::REVERSED),
+                    "{palette:?}/{tier:?}: cursor is not reverse video"
+                );
+            }
         }
     }
 
@@ -438,39 +543,37 @@ mod tests {
     fn the_256_tier_emits_indexed_colour_not_truecolor() {
         // The tier exists for terminals that cannot parse a 24-bit escape;
         // emitting Rgb here would send ESC[38;2;… to exactly those terminals.
-        let t = Theme::new(Tier::Ansi256);
-        for c in [
-            t.ok,
-            t.warn,
-            t.critical,
-            t.chrome,
-            t.text,
-            t.cursor,
-            t.selection_bg,
-        ] {
-            assert!(
-                matches!(c, Color::Indexed(_)),
-                "256 tier emitted {c:?}, which is not an indexed colour"
-            );
+        for palette in [Palette::Safe, Palette::Classic] {
+            let t = Theme::new(palette, Tier::Ansi256);
+            for c in [t.ok, t.warn, t.critical, t.chrome, t.text, t.selection_bg] {
+                assert!(
+                    matches!(c, Color::Indexed(_)),
+                    "{palette:?} 256 tier emitted {c:?}, not indexed"
+                );
+            }
         }
     }
 
     #[test]
     fn the_256_and_truecolor_tiers_are_genuinely_different() {
-        let a = Theme::new(Tier::Ansi256);
-        let b = Theme::new(Tier::TrueColor);
-        assert_ne!(a.ok, b.ok);
-        assert_ne!(a.critical, b.critical);
+        for palette in [Palette::Safe, Palette::Classic] {
+            let a = Theme::new(palette, Tier::Ansi256);
+            let b = Theme::new(palette, Tier::TrueColor);
+            assert_ne!(a.ok, b.ok, "{palette:?}: 256 and truecolor identical");
+            assert_ne!(a.critical, b.critical);
+        }
     }
 
     #[test]
     fn selection_sets_a_foreground_with_its_background() {
         // A background alone inherits the terminal default foreground, which on
         // a light theme is dark — an invisible selected row.
-        for tier in [Tier::Ansi16, Tier::Ansi256, Tier::TrueColor] {
-            let s = Theme::new(tier).selection_style();
-            assert!(s.bg.is_some());
-            assert!(s.fg.is_some(), "{tier:?} selection would inherit fg");
+        for palette in [Palette::Safe, Palette::Classic] {
+            for tier in [Tier::Ansi16, Tier::Ansi256, Tier::TrueColor] {
+                let s = Theme::new(palette, tier).selection_style();
+                assert!(s.bg.is_some());
+                assert!(s.fg.is_some(), "{palette:?}/{tier:?} selection inherits fg");
+            }
         }
     }
 
@@ -478,17 +581,19 @@ mod tests {
     fn dim_uses_one_mechanism_not_both() {
         // DIM blends toward the background, so a dim hue plus the dim modifier
         // compounds into a contrast regression.
-        for tier in [Tier::Ansi16, Tier::Ansi256, Tier::TrueColor] {
-            let s = Theme::new(tier).dim_style();
-            assert!(s.fg.is_some());
-            assert!(
-                !s.add_modifier.contains(Modifier::DIM),
-                "{tier:?} double-dims"
-            );
+        for palette in [Palette::Safe, Palette::Classic] {
+            for tier in [Tier::Ansi16, Tier::Ansi256, Tier::TrueColor] {
+                let s = Theme::new(palette, tier).dim_style();
+                assert!(s.fg.is_some());
+                assert!(
+                    !s.add_modifier.contains(Modifier::DIM),
+                    "{palette:?}/{tier:?} double-dims"
+                );
+            }
+            let mono = Theme::new(palette, Tier::Mono).dim_style();
+            assert!(mono.add_modifier.contains(Modifier::DIM));
+            assert_eq!(mono.fg, None);
         }
-        let mono = Theme::new(Tier::Mono).dim_style();
-        assert!(mono.add_modifier.contains(Modifier::DIM));
-        assert_eq!(mono.fg, None);
     }
 
     #[test]
@@ -507,9 +612,11 @@ mod tests {
     #[test]
     fn rich_tiers_control_their_own_hues() {
         // ANSI slots are chosen by the user's terminal theme; RGB is not.
-        let t = Theme::new(Tier::TrueColor);
-        assert!(matches!(t.ok, Color::Rgb(..)));
-        assert!(matches!(t.critical, Color::Rgb(..)));
+        for palette in [Palette::Safe, Palette::Classic] {
+            let t = Theme::new(palette, Tier::TrueColor);
+            assert!(matches!(t.ok, Color::Rgb(..)));
+            assert!(matches!(t.critical, Color::Rgb(..)));
+        }
     }
 
     #[test]
@@ -537,6 +644,52 @@ mod tests {
         // A dumb or absent terminal gets no colour.
         assert_eq!(Tier::detect_from(false, None, Some("dumb")), Mono);
         assert_eq!(Tier::detect_from(false, None, None), Mono);
+    }
+
+    #[test]
+    fn safe_palette_never_reuses_a_status_hue_for_identity() {
+        // Status means a state; identity means which thing this is. A series
+        // that borrows a status hue destroys the status hue's meaning.
+        for tier in [Tier::Ansi16, Tier::Ansi256, Tier::TrueColor] {
+            let t = Theme::new(Palette::Safe, tier);
+            for status in [t.ok, t.warn, t.critical] {
+                assert_ne!(t.series_cpu, status, "{tier:?}: cpu borrows a status hue");
+                assert_ne!(t.series_mem, status, "{tier:?}: mem borrows a status hue");
+            }
+            assert_ne!(t.series_cpu, t.series_mem, "{tier:?}: series are identical");
+        }
+    }
+
+    #[test]
+    fn safe_palette_drops_green() {
+        // The whole point: green↔yellow measured 3.7 apart under protanopia.
+        let t = Theme::new(Palette::Safe, Tier::Ansi16);
+        assert_ne!(t.ok, Color::Green);
+        assert_eq!(t.ok, Color::Cyan);
+    }
+
+    #[test]
+    fn classic_palette_is_still_reachable() {
+        let t = Theme::new(Palette::Classic, Tier::Ansi16);
+        assert_eq!(t.ok, Color::Green);
+        assert_eq!(t.warn, Color::Yellow);
+        assert_eq!(t.critical, Color::Red);
+    }
+
+    #[test]
+    fn mono_ignores_the_palette_entirely() {
+        assert_eq!(
+            Theme::new(Palette::Safe, Tier::Mono),
+            Theme::new(Palette::Classic, Tier::Mono)
+        );
+    }
+
+    #[test]
+    fn palette_parse_round_trips() {
+        assert_eq!(Palette::parse("safe"), Some(Palette::Safe));
+        assert_eq!(Palette::parse("classic"), Some(Palette::Classic));
+        assert_eq!(Palette::parse("nonsense"), None);
+        assert_eq!(Palette::default(), Palette::Safe);
     }
 
     #[test]
