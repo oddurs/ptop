@@ -1356,3 +1356,78 @@ fn status_colour_is_kept_where_it_answers_is_this_bad() {
     assert_ne!(h_idle, h_busy, "header figures lost their status colour");
     assert_ne!(c_idle, c_busy, "core meters lost their status colour");
 }
+
+#[test]
+fn status_and_identity_hues_stay_in_their_own_panels() {
+    // The C6 rule, enforced against a rendered frame rather than the palette
+    // definition — a palette-level test passes happily through a wiring bug,
+    // which is exactly how G5 shipped `ok` green into the timeline.
+    //
+    // Both states are rendered. The timeline's cursor readout only exists while
+    // scrubbed, and it prints the same figures the header colours with
+    // `figure_style`, so it is the likeliest place for a status hue to leak
+    // into the timeline — and a live-only render never draws it.
+    for scrubbed in [false, true] {
+        let mut app = App::new(600);
+        for i in (0..80).rev() {
+            // Sweep the range so every status band is actually reached.
+            app.push(sample_at((i as f32 * 1.3) % 100.0, i));
+        }
+        app.theme = Theme::new(Palette::Safe, Tier::TrueColor);
+        if scrubbed {
+            app.history.scrub(-6);
+        }
+
+        let (w, h) = (110u16, 30u16);
+        let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
+        term.draw(|f| ui::draw(f, &app)).unwrap();
+        let buf = term.backend().buffer();
+
+        let status = [app.theme.ok, app.theme.warn, app.theme.critical];
+        let identity = [app.theme.series_cpu, app.theme.series_mem];
+        let timeline = ui::timeline_rows_range();
+
+        let mut identity_marks = 0;
+        let mut status_hues = std::collections::HashSet::new();
+        for y in 0..h {
+            for x in 0..w {
+                let c = &buf[(x, y)];
+                let blank = c.symbol() == " " || c.symbol() == "\u{2800}";
+                if timeline.contains(&y) {
+                    assert!(
+                        !status.contains(&c.fg),
+                        "scrubbed={scrubbed}: status hue {:?} in the timeline at ({x},{y})",
+                        c.fg
+                    );
+                    // Count only drawn bars. Every cell in a graph row carries
+                    // the series fg, blank ones included, so counting cells
+                    // would still pass if the timeline drew nothing at all.
+                    if identity.contains(&c.fg) && !blank {
+                        identity_marks += 1;
+                    }
+                } else {
+                    assert!(
+                        !identity.contains(&c.fg),
+                        "scrubbed={scrubbed}: identity hue {:?} outside the timeline at ({x},{y})",
+                        c.fg
+                    );
+                    // Only count outside the header's LIVE badge: `live` is the
+                    // `ok` hue by design, so it alone would satisfy a naive
+                    // "some status colour appeared" check even with every
+                    // figure, meter and table cell stripped of status colour.
+                    if status.contains(&c.fg) && !blank && y >= ui::HEADER_H {
+                        status_hues.insert(format!("{:?}", c.fg));
+                    }
+                }
+            }
+        }
+        assert!(
+            identity_marks > 20,
+            "scrubbed={scrubbed}: timeline drew no data ({identity_marks} marks)"
+        );
+        assert!(
+            !status_hues.is_empty(),
+            "scrubbed={scrubbed}: no status colour outside the header at all"
+        );
+    }
+}

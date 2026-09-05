@@ -20,6 +20,35 @@
 
 use ratatui::style::{Color, Modifier, Style};
 
+// # Which token belongs where
+//
+// Every colour in ptop does exactly one of four jobs, and the jobs do not share
+// hues. The rule that costs most to break is the first: a status colour reused
+// as a series colour destroys the meaning of that status colour *everywhere
+// else in the UI*, because the reader can no longer tell whether red means
+// "this is bad" or merely "this is the third thing".
+//
+// | Job      | Tokens                     | Means                      | Drawn by |
+// |----------|----------------------------|----------------------------|----------|
+// | Status   | `ok` `warn` `critical`     | a state — is this bad now? | header figures, core meters, the process table's CPU column |
+// | Identity | `series_cpu` `series_mem`  | which thing this is        | the timeline graphs |
+// | Chrome   | `chrome` `text` `text_dim` | structure, not data        | borders, titles, axis labels, the tree spine, the help line |
+// | Cursor   | (no hue — reverse video)   | where you are              | the PAUSED badge, the scrub marker, the filter prompt |
+//
+// Two fields sit outside the table deliberately. `live` **is** the `ok` hue:
+// live-versus-paused is a state, so the LIVE badge is a status use of a status
+// colour rather than a fourth job. `selection_bg` is a background rather than a
+// hue carrying meaning, and pairs with `text` so a selected row stays legible
+// on a light terminal.
+//
+// The split between status and identity is what G5 acted on: bar height already
+// encodes magnitude, so colouring a graph by its own value spends the only free
+// channel on information the chart is already showing.
+//
+// Enforced by `no_palette_reuses_a_status_hue_for_identity` and
+// `identity_hues_clear_both_status_palettes` here, and by
+// `status_and_identity_hues_stay_in_their_own_panels` in `ui_tests`.
+
 /// How much colour the terminal can be trusted with.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Tier {
