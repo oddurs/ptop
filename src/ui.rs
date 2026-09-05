@@ -19,12 +19,11 @@ const BARS: [char; 8] = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█']
 /// renderer lays out with, rather than re-deriving them from a comment that
 /// silently goes stale.
 // One divider row per section instead of two border rows per panel, and no
-// side borders at all. On a 30-row terminal that returns five rows and two
-// columns to the data — more than the header and cores panels together used to
-// occupy. Boxes also compete with their own contents for attention; a hairline
-// rule separates without doing that.
-pub const HEADER_H: u16 = 2; // title, figures
-pub const CORES_H: u16 = 2; // divider, meters
+// side borders at all, which returned five rows and two columns to the data.
+// Boxes also compete with their own contents for attention; a hairline rule
+// separates without doing that. L2 then folded the cores section in here,
+// trading its divider and its data row for one header line.
+pub const HEADER_H: u16 = 3; // title, figures, cores
 pub const TIMELINE_H: u16 = 9; // divider, graphs, cursor, legend
 
 /// Rows occupied by the timeline panel, borders included.
@@ -33,14 +32,13 @@ pub const TIMELINE_H: u16 = 9; // divider, graphs, cursor, legend
 /// the renderer lays out with, rather than copying them into a comment.
 #[cfg(test)]
 pub fn timeline_rows_range() -> std::ops::Range<u16> {
-    let top = HEADER_H + CORES_H;
+    let top = HEADER_H;
     top..top + TIMELINE_H
 }
 
 pub fn draw(f: &mut Frame, app: &App) {
     let chunks = Layout::vertical([
         Constraint::Length(HEADER_H),
-        Constraint::Length(CORES_H),
         Constraint::Length(TIMELINE_H),
         Constraint::Min(5),    // processes
         Constraint::Length(1), // help
@@ -56,10 +54,9 @@ pub fn draw(f: &mut Frame, app: &App) {
     };
 
     draw_header(f, chunks[0], app, sample);
-    draw_cores(f, chunks[1], sample, &app.theme);
-    draw_timeline(f, chunks[2], app);
-    draw_procs(f, chunks[3], app);
-    draw_help(f, chunks[4], app);
+    draw_timeline(f, chunks[1], app);
+    draw_procs(f, chunks[2], app);
+    draw_help(f, chunks[3], app);
 }
 
 /// A section rule with its name on it, replacing a panel border.
@@ -169,16 +166,22 @@ fn draw_header(f: &mut Frame, area: Rect, app: &App, s: &Sample) {
         )
     };
 
-    // The heat scale lives here rather than on the cores panel, which is not
-    // drawn at all on a host with no per-core data — leaving the ramp that
-    // still colours these very figures with its thresholds stated nowhere.
+    // The heat scale lives on the title line: it is a reference for the
+    // figures just below it, and the header is always drawn.
     let mut title = vec![state];
     if let Some(scale) = heat_scale(area.width) {
         title.push(Span::styled(scale, app.theme.dim_style()));
     }
     let title = Line::from(title);
 
-    f.render_widget(Paragraph::new(vec![title, Line::from(spans)]), area);
+    f.render_widget(
+        Paragraph::new(vec![
+            title,
+            Line::from(spans),
+            core_meters(s, area.width, &app.theme),
+        ]),
+        area,
+    );
 }
 
 /// The heat ramp's scale, when the panel is wide enough to carry it.
@@ -204,34 +207,65 @@ fn heat_scale(width: u16) -> Option<String> {
     (width as usize >= scale.chars().count() + RESERVED).then_some(scale)
 }
 
-fn draw_cores(f: &mut Frame, area: Rect, s: &Sample, theme: &Theme) {
+/// The per-core meters, as one line of the header.
+///
+/// They were a section of their own: two rows, of which one was a divider and
+/// one was a single line of glyphs. That is a section's worth of chrome for a
+/// status strip, and it read as a chart when it is really a row of figures.
+///
+/// One column per core rather than two. A 128-core machine needs 128 columns
+/// at one glyph each, which a wide terminal has; at two it needs 256, which
+/// nothing has. Cores beyond the width are summarised rather than clipped, so
+/// the count is never silently wrong.
+fn core_meters(s: &Sample, width: u16, theme: &Theme) -> Line<'static> {
     if s.cpu_per_core.is_empty() {
-        return;
+        return Line::from(Span::styled("cores: not reported", theme.dim_style()));
     }
-    // One glyph per core, so a 128-core box still fits on one line.
-    let spans: Vec<Span> = s
-        .cpu_per_core
-        .iter()
-        .flat_map(|&pct| {
-            let idx = ((pct / 100.0 * 7.0).round() as usize).min(7);
-            [
-                Span::styled(BARS[idx].to_string(), theme.heat_style(pct)),
-                Span::raw(" "),
-            ]
-        })
-        .collect();
+    let n = s.cpu_per_core.len();
+    let w = width as usize;
+    let label = format!("{n:>3} cores ");
 
-    f.render_widget(
-        Paragraph::new(vec![
-            divider(
-                &format!("cores ({})", s.cpu_per_core.len()),
-                area.width,
-                theme,
-            ),
-            Line::from(spans),
-        ]),
-        area,
-    );
+    // Too narrow even for the label: state the count and draw nothing. A row of
+    // meters that cannot say how many are missing is worse than no meters.
+    if label.chars().count() >= w {
+        return Line::from(Span::styled(format!("{n} cores"), theme.dim_style()));
+    }
+    let avail = w - label.chars().count();
+
+    // The marker's width depends on how many are hidden, which depends on how
+    // many fit — so shrink until the whole line fits rather than reserving a
+    // guess. Reserving `" +{n}"` while printing `" +{overflow}"` wasted a
+    // column, and once the reservation exceeded the room available it produced
+    // a marker ratatui then clipped: `16 cores  +1` for sixteen hidden cores.
+    let marker_len = |shown: usize| {
+        if shown == n {
+            0
+        } else {
+            format!(" +{}", n - shown).chars().count()
+        }
+    };
+    let mut shown = n.min(avail);
+    while shown + marker_len(shown) > avail {
+        if shown == 0 {
+            break;
+        }
+        shown -= 1;
+    }
+    // Even a bare marker does not fit. State the count alone: drawing meters
+    // that cannot say how many are missing is the failure this exists to avoid.
+    if shown + marker_len(shown) > avail {
+        return Line::from(Span::styled(format!("{n} cores"), theme.dim_style()));
+    }
+
+    let mut spans = vec![Span::styled(label, theme.dim_style())];
+    spans.extend(s.cpu_per_core.iter().take(shown).map(|&pct| {
+        let idx = ((pct / 100.0 * 7.0).round() as usize).min(7);
+        Span::styled(BARS[idx].to_string(), theme.heat_style(pct))
+    }));
+    if shown < n {
+        spans.push(Span::styled(format!(" +{}", n - shown), theme.dim_style()));
+    }
+    Line::from(spans)
 }
 
 /// Draw just the timeline panel, for visual inspection in tests.

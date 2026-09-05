@@ -716,7 +716,9 @@ fn every_section_rule_uses_the_chrome_token() {
             }
         }
     }
-    assert!(rules >= 3, "expected a rule per section, saw {rules}");
+    // Timeline and processes. The cores section folded into the header in L2,
+    // so it has no rule of its own any more.
+    assert!(rules >= 2, "expected a rule per section, saw {rules}");
 }
 
 #[test]
@@ -1412,14 +1414,14 @@ fn status_colour_is_kept_where_it_answers_is_this_bad() {
         let mut term = Terminal::new(TestBackend::new(100, 30)).unwrap();
         term.draw(|f| ui::draw(f, &app)).unwrap();
         let buf = term.backend().buffer();
-        // Sections are now header (rows 0-1), a cores divider (row 2) and the
-        // core meters (row 3) — no border rows between them.
+        // The header is rows 0-2: title, figures, then the core meters that
+        // L2 folded in from their own section.
         let row = |y: u16| {
             (0..100u16)
                 .map(|x| format!("{:?}", buf[(x, y)].fg))
                 .collect::<String>()
         };
-        (row(1), row(3))
+        (row(1), row(2))
     };
     let (h_idle, c_idle) = styles_at(5.0);
     let (h_busy, c_busy) = styles_at(95.0);
@@ -1653,6 +1655,99 @@ fn every_scrub_position_keeps_the_cursor_inside_the_window() {
                 "zoom step {zoom_steps}, scrub {step}: cursor left the window"
             );
             app.history.scrub(11);
+        }
+    }
+}
+
+#[test]
+fn a_many_core_machine_summarises_rather_than_clipping() {
+    // Cores that do not fit are counted, not dropped, so the number on screen
+    // is never quietly wrong.
+    //
+    // The assertion is on the marker's *content*, not the row's length: every
+    // TestBackend row is exactly `w` cells whatever was clipped, so a length
+    // check is a tautology and passed the very bug this now catches — at 13
+    // columns a 16-core machine rendered `16 cores  +1`, the marker sized from
+    // the core count and then clipped by ratatui.
+    for cores in [16usize, 128, 1024] {
+        let mut app = App::new(60);
+        let mut s = sample(50.0);
+        s.cpu_per_core = (0..cores).map(|i| (i as f32 * 0.78) % 100.0).collect();
+        app.push(s);
+        app.theme = Theme::new(Palette::Safe, Tier::TrueColor);
+
+        for w in [13u16, 16, 24, 80, 100, 200] {
+            let mut term = Terminal::new(TestBackend::new(w, 30)).unwrap();
+            term.draw(|f| ui::draw(f, &app)).unwrap();
+            let buf = term.backend().buffer();
+            let row: String = (0..w).map(|x| buf[(x, 2)].symbol()).collect();
+            let drawn = row.chars().filter(|c| BAR_GLYPHS.contains(c)).count();
+            // Whatever it degrades to, the count itself is always stated.
+            assert!(
+                row.contains(&cores.to_string()),
+                "cores={cores} w={w}: core count missing from {row:?}"
+            );
+
+            match row.split_once('+') {
+                Some((_, tail)) => {
+                    let hidden: usize = tail.trim().parse().unwrap_or_else(|_| {
+                        panic!("cores={cores} w={w}: unreadable marker {row:?}")
+                    });
+                    assert_eq!(
+                        drawn + hidden,
+                        cores,
+                        "cores={cores} w={w}: {drawn} drawn + {hidden} hidden != {cores}, in {row:?}"
+                    );
+                }
+                // No marker is honest in exactly two cases: everything is
+                // drawn, or nothing is and the line states the count alone.
+                // A partial draw with no marker is the silent lie.
+                None => assert!(
+                    drawn == cores || drawn == 0,
+                    "cores={cores} w={w}: {drawn} of {cores} drawn with no marker, in {row:?}"
+                ),
+            }
+        }
+    }
+}
+
+/// The eighth-block glyphs the meters draw with.
+const BAR_GLYPHS: [char; 8] = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
+
+#[test]
+fn a_host_with_no_per_core_data_says_so() {
+    // The line is part of the header now, so it is always drawn — silence
+    // would read as "zero cores" rather than "not reported".
+    let mut app = App::new(60);
+    let mut s = sample(50.0);
+    s.cpu_per_core.clear();
+    app.push(s);
+    app.theme = Theme::new(Palette::Safe, Tier::TrueColor);
+    let mut term = Terminal::new(TestBackend::new(100, 30)).unwrap();
+    term.draw(|f| ui::draw(f, &app)).unwrap();
+    let buf = term.backend().buffer();
+    let row: String = (0..100u16).map(|x| buf[(x, 2)].symbol()).collect();
+    assert!(
+        row.contains("not reported"),
+        "silent about missing cores: {row:?}"
+    );
+}
+
+#[test]
+#[ignore = "visual"]
+fn show_core_overflow() {
+    for cores in [16usize, 128, 1024] {
+        for w in [13u16, 16, 24, 40, 80] {
+            let mut app = App::new(60);
+            let mut s = sample(50.0);
+            s.cpu_per_core = (0..cores).map(|i| (i as f32 * 0.78) % 100.0).collect();
+            app.push(s);
+            app.theme = Theme::new(Palette::Safe, Tier::TrueColor);
+            let mut term = Terminal::new(TestBackend::new(w, 30)).unwrap();
+            term.draw(|f| ui::draw(f, &app)).unwrap();
+            let buf = term.backend().buffer();
+            let row: String = (0..w).map(|x| buf[(x, 2)].symbol()).collect();
+            println!("  {cores:>4} cores, w={w:<4} |{}|", row);
         }
     }
 }

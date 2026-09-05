@@ -38,7 +38,7 @@ monochrome.
 
 ---
 
-## L2 — Fold the core meters into the header  ·  `S`
+## L2 — Fold the core meters into the header  ·  `S`  ·  **DONE**
 
 **What.** Move the per-core glyph row onto the header line; delete the cores
 panel.
