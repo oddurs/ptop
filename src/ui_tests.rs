@@ -1431,3 +1431,89 @@ fn status_and_identity_hues_stay_in_their_own_panels() {
         );
     }
 }
+
+#[test]
+fn the_heat_ramp_states_its_scale() {
+    // The 50/80 thresholds drove every colour decision in the UI and were
+    // written down nowhere in it.
+    let mut app = App::new(60);
+    app.push(sample(50.0));
+    app.theme = Theme::new(Palette::Safe, Tier::TrueColor);
+
+    let render = |w: u16| {
+        let mut term = Terminal::new(TestBackend::new(w, 30)).unwrap();
+        term.draw(|f| ui::draw(f, &app)).unwrap();
+        let buf = term.backend().buffer();
+        (0..30u16)
+            .map(|y| (0..w).map(|x| buf[(x, y)].symbol()).collect::<String>())
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+
+    let wide = render(100);
+    assert!(wide.contains("warn 50"), "heat ramp has no scale:\n{wide}");
+    assert!(wide.contains("crit 80"));
+
+    // A reference yields before the data it refers to.
+    assert!(
+        !render(30).contains("warn 50"),
+        "scale did not yield when narrow"
+    );
+}
+
+#[test]
+fn the_scale_survives_a_host_with_no_per_core_data() {
+    // It used to live on the cores panel, which is not drawn at all when the
+    // platform reports no per-core figures — leaving the ramp that still
+    // colours the header and the process table with no stated thresholds.
+    let mut app = App::new(60);
+    let mut s = sample(50.0);
+    s.cpu_per_core.clear();
+    app.push(s);
+    app.theme = Theme::new(Palette::Safe, Tier::TrueColor);
+
+    let mut term = Terminal::new(TestBackend::new(100, 30)).unwrap();
+    term.draw(|f| ui::draw(f, &app)).unwrap();
+    let buf = term.backend().buffer();
+    let text: String = (0..30u16)
+        .flat_map(|y| (0..100u16).map(move |x| (x, y)))
+        .map(|(x, y)| buf[(x, y)].symbol())
+        .collect();
+    assert!(
+        !text.contains("cores ("),
+        "fixture should have no cores panel"
+    );
+    assert!(
+        text.contains("warn 50"),
+        "scale vanished with the cores panel"
+    );
+}
+
+#[test]
+fn the_stated_scale_matches_the_colouring_it_describes() {
+    // The previous version built its expectation from the same constants and
+    // format literal as the code under test, so it pinned the title's shape
+    // rather than its agreement with anything. This ties the printed numbers
+    // to where `heat` actually changes colour.
+    let th = Theme::new(Palette::Safe, Tier::TrueColor);
+    assert_ne!(
+        th.heat(Theme::WARN_PCT - 0.1),
+        th.heat(Theme::WARN_PCT),
+        "the printed warn threshold is not where the colour changes"
+    );
+    assert_ne!(
+        th.heat(Theme::CRITICAL_PCT - 0.1),
+        th.heat(Theme::CRITICAL_PCT),
+        "the printed critical threshold is not where the colour changes"
+    );
+
+    let mut app = App::new(60);
+    app.push(sample(50.0));
+    app.theme = th;
+    let mut term = Terminal::new(TestBackend::new(100, 30)).unwrap();
+    term.draw(|f| ui::draw(f, &app)).unwrap();
+    let buf = term.backend().buffer();
+    let row: String = (0..100u16).map(|x| buf[(x, 0)].symbol()).collect();
+    assert!(row.contains(&format!("warn {:.0}", Theme::WARN_PCT)));
+    assert!(row.contains(&format!("crit {:.0}", Theme::CRITICAL_PCT)));
+}
