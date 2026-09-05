@@ -1457,7 +1457,7 @@ fn status_and_identity_hues_stay_in_their_own_panels() {
 
         let status = [app.theme.ok, app.theme.warn, app.theme.critical];
         let identity = [app.theme.series_cpu, app.theme.series_mem];
-        let timeline = ui::timeline_rows_range();
+        let timeline = ui::timeline_rows_range(h);
 
         let mut identity_marks = 0;
         let mut status_hues = std::collections::HashSet::new();
@@ -1749,5 +1749,106 @@ fn show_core_overflow() {
             let row: String = (0..w).map(|x| buf[(x, 2)].symbol()).collect();
             println!("  {cores:>4} cores, w={w:<4} |{}|", row);
         }
+    }
+}
+
+#[test]
+fn growing_the_timeline_never_shrinks_it() {
+    // The bug this guards: a purely proportional height gave an 80x24 terminal
+    // five rows where nine were fixed before — a quarter of the CPU resolution,
+    // on the commonest terminal size, from a change justified by *more*
+    // resolution. Wherever the old fixed height fits, it is the floor.
+    for total in 16..=200u16 {
+        assert!(
+            ui::timeline_height(total) >= ui::TIMELINE_MIN_H,
+            "total={total}: {} rows, below the {} it had when fixed",
+            ui::timeline_height(total),
+            ui::TIMELINE_MIN_H
+        );
+    }
+}
+
+#[test]
+fn the_timeline_grows_above_the_floor_and_stops() {
+    let h = |t| ui::timeline_height(t);
+    assert_eq!(h(24), ui::TIMELINE_MIN_H, "should still be at the floor");
+    assert!(h(40) > h(24), "did not grow when there was room");
+    for total in [80u16, 200, 500] {
+        assert_eq!(h(total), ui::TIMELINE_MAX_H, "total={total}: unbounded");
+    }
+}
+
+#[test]
+fn the_process_table_always_keeps_some_rows() {
+    // Including on terminals too small for the timeline's own floor, where the
+    // timeline takes what is left rather than the height it would prefer.
+    for total in 6..=80u16 {
+        let left = total.saturating_sub(ui::HEADER_H + ui::timeline_height(total) + 1);
+        assert!(left >= 1, "total={total}: process table got {left} rows");
+    }
+}
+
+#[test]
+fn a_taller_window_draws_more_graph_rows() {
+    // The previous version of this test joined the *whole screen* at two
+    // heights and asserted the strings differed — which a 24-line and a 50-line
+    // string always do, so it held even for a constant height. Count the
+    // timeline's own non-blank graph rows instead.
+    let mut app = App::new(600);
+    for i in (0..200).rev() {
+        app.push(sample_at((i as f32 * 1.7) % 100.0, i as u64));
+    }
+    app.theme = Theme::new(Palette::Safe, Tier::TrueColor);
+
+    let graph_rows = |total: u16| {
+        let mut term = Terminal::new(TestBackend::new(100, total)).unwrap();
+        term.draw(|f| ui::draw(f, &app)).unwrap();
+        let buf = term.backend().buffer();
+        let range = ui::timeline_rows_range(total);
+        range
+            .filter(|&y| {
+                (0..100u16).any(|x| {
+                    let s = buf[(x, y)].symbol();
+                    s != " " && s != "\u{2800}" && s != "─"
+                })
+            })
+            .count()
+    };
+    let small = graph_rows(24);
+    let large = graph_rows(50);
+    assert!(
+        large > small,
+        "a 50-row window drew {large} timeline rows, a 24-row one {small}"
+    );
+}
+
+#[test]
+fn a_gutter_is_only_reserved_when_something_can_fill_it() {
+    // Four columns of padding with no anchors and no label is four columns of
+    // history thrown away. Only reachable now that the panel can be squeezed
+    // below the height at which a section can carry a scale.
+    let mut app = App::new(600);
+    for i in (0..200).rev() {
+        app.push(sample_at(50.0, i));
+    }
+    app.theme = Theme::new(Palette::Safe, Tier::TrueColor);
+
+    for total in 8..=40u16 {
+        let mut term = Terminal::new(TestBackend::new(100, total)).unwrap();
+        term.draw(|f| ui::draw(f, &app)).unwrap();
+        let buf = term.backend().buffer();
+        let range = ui::timeline_rows_range(total);
+        // Skip the section rule; look at the graph rows only.
+        let gutter_blank = range
+            .clone()
+            .skip(1)
+            .all(|y| (0..4u16).all(|x| buf[(x, y)].symbol() == " "));
+        let graph_drawn = range.skip(1).any(|y| {
+            (4..100u16).any(|x| buf[(x, y)].symbol() != " " && buf[(x, y)].symbol() != "\u{2800}")
+        });
+        assert!(
+            !(gutter_blank && graph_drawn),
+            "total={total}: four gutter columns reserved and left empty"
+        );
     }
 }
