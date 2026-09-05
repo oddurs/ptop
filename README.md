@@ -1,25 +1,68 @@
 # ptop
 
-A system monitor you can rewind.
+A system monitor you can rewind, with nothing to set up first.
 
-`htop`, `btop`, and `bottom` all show you *now*. You notice a CPU spike, tab over
-to look, and it's already gone. ptop keeps every sample it takes — including the
-full process table — so you can scrub backwards and ask what was actually eating
-the box forty seconds ago.
+ptop keeps every sample it takes — including the full process table — so you can
+scrub backwards and ask what was eating the box forty seconds ago. It starts
+with an empty buffer and fills it as it runs: no daemon, no config, no logfiles,
+nothing that had to be running before you noticed the problem.
 
 ```
 ┌ ptop — PAUSED  -18s ─────────────────────────────────────────────────────────┐
 │CPU  50.9%   MEM  62.5% (10.0G / 16.0G, 8.0G avail)   LOAD 1.00 2.00 3.00     │
 └──────────────────────────────────────────────────────────────────────────────┘
-┌ timeline — 90s shown, 90s of 600s buffered ──────────────────────────────────┐
-│▁▅█▇▃▃▇█▅▁▅█▇▃▃▇█▅▁▅█▇▃▄▇▇▅▁▆█▇▃▄▇▇▅▁▆█▇▃▄▇▇▅▂▆█▆▃▄▇▇▅▂▆█▆▃▄▇▇▅▂▆█▆▂▄▇▇▅▂▆█▆▂│
-│▅▅▅▅▅▅▅▅▅▅▅▅▅▅▅▅▄▄▄▄▃▃▃▃▃▃▃▃▄▄▄▄▅▅▅▅▅▅▅▅▅▅▅▅▅▅▅▅▄▄▄▃▃▃▃▃▃▃▃▃▄▄▄▅▅▅▅▅▅▅▅▅▅▅▅▅▅│
-│                                              ▲                               │
+┌ timeline — 5m00s of 10m00s buffered ─────────────────────────────────────────┐
+│⢠⡄⠀⡆⠀⣤⠀⣰⠀⢰⡄⢀⡆⠀⣦⠀⣰⠀⢰⡄⢀⡆⠀⣦⠀⣰⠀⢰⡄⢀⡆⠀⣆⠀⣰⠀⢰⡀⢀⡆⠀⣆⠀⣰⠀⢰⡀⢀⡆⠀⣆⠀⣰⠀⢰⡀⢠⡆⠀⣆⠀⣴⠀⢰⡀⢠⡆⠀⣆⠀⣴⠀⢰⡀⢠⡆⠀⣆⠀⣤│
+│⢸⡇⢸⣷⢀⣿⠀⣿⡆⣸⡇⢸⣷⢀⣿⠀⣿⡆⣸⡇⢸⣷⢀⣿⠀⣿⡄⣸⡇⢸⣧⢀⣿⠀⣿⡄⣼⡇⢸⣧⢠⣿⠀⣿⡄⣼⡇⢸⣇⢠⣿⠀⣿⡀⣼⡇⢸⣇⢠⣿⠀⣿⡀⣾⡇⢸⣇⢰⣿⠀⣿⡀⣾⡇⢸⣇⢰⣿⠀⣿│
+│⣿⣷⢸⣿⢸⣿⡆⣿⡇⣿⣷⢸⣿⢸⣿⡆⣿⡇⣿⣧⣸⣿⢸⣿⣄⣿⡇⣿⣧⣸⣿⢸⣿⣄⣿⡇⣿⣇⣸⣿⢸⣿⣀⣿⡇⣿⣇⣸⣿⢸⣿⣠⣿⡇⣿⣇⣼⣿⢸⣿⣠⣿⡇⣿⡇⣼⣿⢸⣿⢰⣿⡇⣿⡇⣾⣿⢸⣿⢰⣿│
+│⣿⣿⣾⣿⣼⣿⣷⣿⣧⣿⣿⣿⣿⣼⣿⣿⣿⣇⣿⣿⣿⣿⣸⣿⣿⣿⣇⣿⣿⣿⣿⣸⣿⣿⣿⣇⣿⣿⣿⣿⣸⣿⣿⣿⣇⣿⣿⣿⣿⣸⣿⣿⣿⣇⣿⣿⣿⣿⣸⣿⣿⣿⣇⣿⣿⣿⣿⣸⣿⣿⣿⣧⣿⣷⣿⣿⣼⣿⣾⣿│
+│⣤⣄⡀⠀⠀⠀⠀⠀⠀⠀⠀⠀⣀⣤⣤⣤⣤⣀⠀⠀⠀⠀⠀⠀⠀⠀⠀⢀⣠⣤⣤⣤⣤⣀⠀⠀⠀⠀⠀⠀⠀⠀⠀⢀⣠⣤⣤⣤⣄⡀⠀⠀⠀⠀⠀⠀⠀⠀⠀⣀⣤⣤⣤⣤⣀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⣠⣤⣤⣤⣤│
+│⣿⣿⣿⣶⣤⣀⣀⣀⣀⣠⣶⣿⣿⣿⣿⣿⣿⣿⣿⣶⣤⣀⣀⣀⣀⣤⣶⣿⣿⣿⣿⣿⣿⣿⣷⣦⣄⣀⣀⣀⣠⣴⣾⣿⣿⣿⣿⣿⣿⣿⣷⣤⣀⣀⣀⣀⣠⣴⣿⣿⣿⣿⣿⣿⣿⣿⣶⣤⣀⣀⣀⣀⣤⣶⣿⣿⣿⣿⣿⣿│
+│                                                            ▐                 │
+│cpu · mem — 3m16s shown, 1s/slot — ←/→ scrub, +/- zoom                        │
 └──────────────────────────────────────────────────────────────────────────────┘
 ```
 
 The process table below the timeline is the real one from the moment under the
 cursor, not an interpolation. Sampling continues while you are scrubbing.
+
+## Prior art, and where ptop actually differs
+
+ptop is not the first tool to let you look backwards, and it is not the most
+capable one.
+
+**[atop](https://www.atoptool.nl/)** has recorded historical per-process data
+for years. It writes compressed daily logfiles, keeps 28 days by default, and
+does one thing ptop cannot: it captures processes that started *and finished*
+between two samples. If a burst of short-lived processes spiked your machine,
+atop can show you and ptop currently cannot — see
+[`docs/roadmaps/05-data-fidelity.md`](docs/roadmaps/05-data-fidelity.md).
+On raw capability atop is the better tool.
+
+**[zenith](https://github.com/bvaisvil/zenith)** has zoomable scroll-back charts
+and saves data between runs. Its scrollback is aggregate-only, though: its
+history holds CPU, memory, network, disk and GPU series, and its process table
+renders from a live map that drops pids as they exit, so scrolling back moves
+the charts but not the table.
+
+**htop, btop and bottom** keep no history at all. They render the current
+instant.
+
+What ptop offers is narrower than "nobody else does this", and it is a usability
+claim rather than a capability one:
+
+- **Nothing has to have been running.** atop can only replay what its daemon
+  already recorded. The common case — you connect to a machine that is slow
+  *now* — is the case where that daemon was not running. ptop gives you the last
+  ten minutes from a cold start.
+- **One view, live and historical.** Scrubbing happens inside the running
+  monitor, not in a separate replay mode against a logfile.
+- **The process table follows the cursor.** Scrub to a spike and the table below
+  it is the one from that instant.
+
+If you are running a fleet and want history you can rely on after the fact,
+install atop. If you want to know what this box is doing right now and what it
+was doing a few minutes ago, that is what ptop is for.
 
 ## Build
 
@@ -157,13 +200,6 @@ Granular, evidence-backed items live in [`docs/roadmaps/`](docs/roadmaps/),
 derived from reading the prior art (htop, btop, bottom, zenith, atop) and
 auditing this UI against data-visualisation practice. Start with
 [the index](docs/roadmaps/README.md).
-
-Note that [`docs/roadmaps/00-positioning.md`](docs/roadmaps/00-positioning.md)
-records a correction: **atop already does historical per-process replay**, and
-better than ptop in one important respect — it captures processes that exited
-between samples, which ptop cannot yet see. What is left is a usability
-position, not a capability one. The claims elsewhere in this README are being
-revised accordingly.
 
 ## Status
 

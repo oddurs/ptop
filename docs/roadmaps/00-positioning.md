@@ -5,7 +5,7 @@ That claim is wrong and needs correcting before anyone reads it.
 
 ---
 
-## X1 — Correct the prior-art claims  ·  `S`
+## X1 — Correct the prior-art claims  ·  `S`  ·  **DONE**
 
 **What.** Rewrite the opening of `README.md` and the "Status" section so the
 comparison to existing tools is accurate.
