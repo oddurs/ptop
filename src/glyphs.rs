@@ -55,6 +55,24 @@ impl GlyphSet {
         }
     }
 
+    /// A rule mark alone, at dot height `1..=4`, for a cell with no data in it.
+    ///
+    /// Deliberately never merged into a bar. An earlier version OR'd the rule
+    /// into the glyph, which meant a cell holding a spike and an idle sample
+    /// lit a dot at the rule height in the *data* colour — pixel-identical to
+    /// the idle sample having reached the threshold. Half the samples in the
+    /// row could be misread. The rule now yields wherever data is present.
+    pub fn rule_glyph(self, level: usize) -> char {
+        let k = level.clamp(1, 4);
+        match self {
+            Self::Braille => {
+                char::from_u32(0x2800 + (LEFT_DOTS[k - 1] | RIGHT_DOTS[k - 1])).unwrap_or(' ')
+            }
+            Self::Block => '─',
+            Self::Ascii => '-',
+        }
+    }
+
     /// Marker showing which half of a cell the scrub cursor sits on. Without
     /// this, packing two samples per cell would halve cursor precision.
     pub fn cursor_marker(self, right_half: bool) -> char {
@@ -79,18 +97,49 @@ impl GlyphSet {
 /// column. Deriving this beats transcribing a 25-entry table: the rule is one
 /// line and it is impossible to get a single entry subtly wrong.
 fn braille(left: usize, right: usize) -> char {
-    /// Bottom-up dot order for each column.
-    const LEFT: [u32; 4] = [0x40, 0x04, 0x02, 0x01];
-    const RIGHT: [u32; 4] = [0x80, 0x20, 0x10, 0x08];
+    char::from_u32(0x2800 + braille_bits(left, right)).unwrap_or(' ')
+}
 
+/// Bottom-up dot order for each braille column.
+const LEFT_DOTS: [u32; 4] = [0x40, 0x04, 0x02, 0x01];
+const RIGHT_DOTS: [u32; 4] = [0x80, 0x20, 0x10, 0x08];
+
+fn braille_bits(left: usize, right: usize) -> u32 {
     let mut bits = 0;
-    for dot in LEFT.iter().take(left) {
+    for dot in LEFT_DOTS.iter().take(left) {
         bits |= dot;
     }
-    for dot in RIGHT.iter().take(right) {
+    for dot in RIGHT_DOTS.iter().take(right) {
         bits |= dot;
     }
-    char::from_u32(0x2800 + bits).unwrap_or(' ')
+    bits
+}
+
+/// Which row of a `rows`-tall graph holds `pct`, and the dot height `1..=4`
+/// the rule sits at within that row.
+///
+/// `None` when the threshold falls outside the graph entirely.
+pub fn rule_position(pct: f32, rows: usize) -> Option<(usize, usize)> {
+    if !(0.0..=100.0).contains(&pct) || rows == 0 {
+        return None;
+    }
+    let rows_f = rows as f32;
+    for row in 0..rows {
+        let high = 100.0 * (rows_f - row as f32) / rows_f;
+        let low = 100.0 * (rows_f - row as f32 - 1.0) / rows_f;
+        // Top row owns its upper bound so a 100% threshold has somewhere to go.
+        let in_band = if row == 0 { pct <= high } else { pct < high };
+        if in_band && pct >= low {
+            // Must use the same mapping the bars use. With `ceil` here and
+            // `round` there, the rule sat a dot above where a bar of the same
+            // percentage lands: at six graph rows an 80% bar had to reach
+            // 81.25% before it touched its own 80% line, while `heat_style`
+            // already coloured it critical. Two signals, contradicting.
+            let level = level_in_row(pct, row, rows).max(1);
+            return Some((row, level));
+        }
+    }
+    None
 }
 
 /// Quadrant blocks, `left * 5 + right`. Levels 1-2 are the lower half and 3-4
@@ -199,6 +248,75 @@ mod tests {
         assert_eq!(level_in_row(0.0, 0, 1), 0);
         assert_eq!(level_in_row(100.0, 0, 1), 4);
         assert!((1..=4).contains(&level_in_row(50.0, 0, 1)));
+    }
+
+    #[test]
+    fn the_rule_is_visible_in_empty_space() {
+        for set in [GlyphSet::Braille, GlyphSet::Block, GlyphSet::Ascii] {
+            for level in 1..=4 {
+                assert_ne!(
+                    set.rule_glyph(level),
+                    set.glyph(0, 0),
+                    "{set:?}: rule at {level} is invisible"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_rule_spans_both_halves_of_a_braille_cell() {
+        // A mark on one column only would read as a speck, not a line.
+        let bits = GlyphSet::Braille.rule_glyph(1) as u32 - 0x2800;
+        assert_eq!(bits, LEFT_DOTS[0] | RIGHT_DOTS[0]);
+    }
+
+    #[test]
+    fn the_rule_sits_where_a_bar_of_the_same_value_would_reach() {
+        // The bug this guards: the rule used `ceil` and the bars `round`, so
+        // at six graph rows an 80% bar had to climb to 81.25% before it
+        // touched its own 80% line, while heat_style already called it
+        // critical. Two signals, contradicting each other.
+        for rows in 1..=12 {
+            let (row, level) = rule_position(80.0, rows).unwrap();
+            let bar = level_in_row(80.0, row, rows);
+            assert_eq!(
+                level,
+                bar.max(1),
+                "{rows} rows: rule at {level}, an 80% bar at {bar}"
+            );
+        }
+    }
+
+    #[test]
+    fn rule_position_lands_in_the_right_band() {
+        // 80% of a 3-row graph is in the top row, which spans 66.7..100.
+        let (row, level) = rule_position(80.0, 3).unwrap();
+        assert_eq!(row, 0);
+        assert!((1..=4).contains(&level));
+        // 50% of a 2-row graph is the boundary between the bands. It resolves
+        // to the bottom dot of the upper row, which is that boundary drawn.
+        assert_eq!(rule_position(50.0, 2), Some((0, 1)));
+        // Extremes stay inside the graph.
+        assert_eq!(rule_position(100.0, 3).unwrap().0, 0);
+        assert_eq!(rule_position(0.0, 3).unwrap().0, 2);
+    }
+
+    #[test]
+    fn rule_position_refuses_the_impossible() {
+        assert_eq!(rule_position(120.0, 3), None);
+        assert_eq!(rule_position(-1.0, 3), None);
+        assert_eq!(rule_position(50.0, 0), None);
+    }
+
+    #[test]
+    fn every_row_of_a_graph_can_hold_the_rule() {
+        // Whatever the panel height, the threshold must land somewhere.
+        for rows in 1..=8 {
+            assert!(
+                rule_position(80.0, rows).is_some(),
+                "{rows} rows lost the rule"
+            );
+        }
     }
 
     #[test]

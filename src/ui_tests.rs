@@ -740,3 +740,141 @@ fn the_tree_spine_recedes_like_a_gridline() {
     }
     assert!(spine > 0, "expected a tree spine to be drawn, saw none");
 }
+
+/// Rows of the timeline panel that contain a chrome-styled glyph, excluding the
+/// panel edges. Used to locate the threshold rules precisely.
+fn rule_rows(app: &App, w: u16, h: u16) -> Vec<usize> {
+    let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
+    term.draw(|f| ui::draw_timeline_for_test(f, f.area(), app))
+        .unwrap();
+    let buf = term.backend().buffer();
+    (1..h - 1)
+        .filter(|&y| {
+            (1..w - 1).any(|x| {
+                let c = &buf[(x, y)];
+                c.fg == app.theme.chrome && c.symbol() != " "
+            })
+        })
+        .map(|y| (y - 1) as usize)
+        .collect()
+}
+
+#[test]
+fn the_rules_land_on_exactly_the_threshold_rows() {
+    // The previous version of this test asserted only that *some* cell was
+    // chrome-coloured — which the panel border satisfies, so it passed with
+    // the rule removed entirely. This one pins the exact rows, so it cannot.
+    let (w, h) = (100u16, 12u16);
+    let mut app = App::new(600);
+    for i in (0..200).rev() {
+        app.push(sample_at(10.0, i)); // data confined to the bottom row
+    }
+    app.theme = Theme::new(Palette::Safe, Tier::TrueColor);
+
+    // Same arithmetic the renderer uses, so the expectation tracks the layout.
+    let graph_rows = (h as usize - 2).saturating_sub(2).max(1);
+    let cpu_rows = (graph_rows * 3 / 5).max(1);
+    let mem_rows = graph_rows - cpu_rows;
+
+    let mut expected: Vec<usize> = Vec::new();
+    for pct in [
+        crate::theme::Theme::WARN_PCT,
+        crate::theme::Theme::CRITICAL_PCT,
+    ] {
+        if let Some((r, _)) = crate::glyphs::rule_position(pct, cpu_rows) {
+            expected.push(r);
+        }
+    }
+    for pct in [
+        crate::theme::Theme::WARN_PCT,
+        crate::theme::Theme::CRITICAL_PCT,
+    ] {
+        if let Some((r, _)) = crate::glyphs::rule_position(pct, mem_rows) {
+            expected.push(cpu_rows + r);
+        }
+    }
+    expected.sort_unstable();
+    expected.dedup();
+
+    assert_eq!(rule_rows(&app, w, h), expected);
+    assert!(
+        !expected.is_empty(),
+        "no rules expected — test proves nothing"
+    );
+}
+
+#[test]
+fn both_thresholds_get_a_rule_not_just_critical() {
+    // The warn boundary is the one the roadmap asked for; it was hue-only.
+    let (w, h) = (100u16, 16u16);
+    let mut app = App::new(600);
+    for i in (0..200).rev() {
+        let mut s = sample_at(5.0, i);
+        s.mem.used = 1 << 30; // low too, or the 50% band holds data legitimately
+        app.push(s);
+    }
+    app.theme = Theme::new(Palette::Safe, Tier::TrueColor);
+    let rows = rule_rows(&app, w, h);
+    assert!(
+        rows.len() >= 4,
+        "expected warn and critical rules in both graphs, found rows {rows:?}"
+    );
+}
+
+#[test]
+fn the_rule_is_dashed_so_it_cannot_be_read_as_data() {
+    // At the mono tier chrome and a low bar are both dim, and a solid rule row
+    // renders the same glyph a level-1 bar does. Dashing is what separates a
+    // reference line from a row of samples when colour is unavailable.
+    let (w, h) = (100u16, 12u16);
+    let mut app = App::new(600);
+    for i in (0..200).rev() {
+        app.push(sample_at(10.0, i));
+    }
+    app.theme = Theme::new(Palette::Safe, Tier::Mono);
+
+    let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
+    term.draw(|f| ui::draw_timeline_for_test(f, f.area(), &app))
+        .unwrap();
+    let buf = term.backend().buffer();
+
+    let rule_y = 1 + crate::glyphs::rule_position(
+        crate::theme::Theme::CRITICAL_PCT,
+        ((h as usize - 4).max(1) * 3 / 5).max(1),
+    )
+    .unwrap()
+    .0 as u16;
+
+    // U+2800 is the braille blank: visually empty, but not an ASCII space, so
+    // it must be counted as a gap or every braille row looks solid.
+    let blank = |s: &str| s == " " || s == "\u{2800}";
+    let row: Vec<String> = (1..w - 1)
+        .map(|x| buf[(x, rule_y)].symbol().to_string())
+        .collect();
+    let marks = row.iter().filter(|s| !blank(s)).count();
+    let blanks = row.iter().filter(|s| blank(s)).count();
+    assert!(marks > 10, "rule row has no marks: {marks}");
+    assert!(
+        blanks > 10,
+        "rule row is solid, indistinguishable from a bar at the mono tier"
+    );
+}
+
+#[test]
+fn data_always_wins_the_cell_over_the_rule() {
+    // An earlier version OR'd the rule into the bar glyph, so a cell holding a
+    // spike and an idle sample lit a dot at the rule height in the data
+    // colour — identical to the idle sample having crossed the threshold.
+    let (w, h) = (100u16, 12u16);
+    let mut app = App::new(600);
+    for i in (0..200).rev() {
+        let mut s = sample_at(100.0, i);
+        s.mem.used = s.mem.total; // both graphs full, so no cell is empty
+        app.push(s);
+    }
+    app.theme = Theme::new(Palette::Safe, Tier::TrueColor);
+    assert!(
+        rule_rows(&app, w, h).is_empty(),
+        "rule drew over cells that contain data"
+    );
+}

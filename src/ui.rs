@@ -217,10 +217,25 @@ fn draw_timeline(f: &mut Frame, area: Rect, app: &App) {
     let cpu_slots = history::peak_slots(&cpu, zoom, slots);
     let mem_slots = history::peak_slots(&mem, zoom, slots);
 
+    // The threshold rule. Its whole point is that the boundary is readable
+    // without colour — until now the 50/80 thresholds existed *only* as a hue
+    // change, which is invisible to the most common colour vision deficiency
+    // and to anyone on a monochrome terminal. It doubles as the scale anchor
+    // the graph otherwise completely lacked.
     let mut lines: Vec<Line> = Vec::with_capacity(inner_h);
     for (values, rows) in [(&cpu_slots, cpu_rows), (&mem_slots, mem_rows)] {
+        // Both thresholds, not just critical. The warn boundary is the one the
+        // roadmap actually asked for, and leaving it hue-only kept it invisible
+        // to the commonest colour vision deficiency and on any mono terminal.
+        let rules: Vec<(usize, usize)> = [Theme::WARN_PCT, Theme::CRITICAL_PCT]
+            .iter()
+            .filter_map(|&pct| glyphs::rule_position(pct, rows))
+            .collect();
         for row in 0..rows {
-            lines.push(glyph_row(app.glyphs, values, row, rows, spc, &app.theme));
+            let rule_level = rules.iter().find(|(r, _)| *r == row).map(|(_, l)| *l);
+            lines.push(glyph_row(
+                app.glyphs, values, row, rows, spc, &app.theme, rule_level,
+            ));
         }
     }
 
@@ -254,17 +269,29 @@ fn glyph_row(
     rows: usize,
     spc: usize,
     theme: &Theme,
+    rule_level: Option<usize>,
 ) -> Line<'static> {
     let spans = values
         .chunks(spc)
-        .map(|cell| {
+        .enumerate()
+        .map(|(i, cell)| {
             let pcts: Vec<f32> = cell.iter().map(|v| v.unwrap_or(0.0)).collect();
             let left = glyphs::level_in_row(pcts[0], row, rows);
             let right = glyphs::level_in_row(*pcts.get(1).unwrap_or(&pcts[0]), row, rows);
             // Colour by the peak of the pair: a cell holding a spike and an
             // idle sample should read as hot, not as lukewarm.
             let peak = pcts.iter().copied().fold(0.0_f32, f32::max);
-            Span::styled(set.glyph(left, right).to_string(), theme.heat_style(peak))
+            // Data always wins the cell. The rule fills gaps only, and dashes
+            // so it reads as a reference line rather than a row of samples — at
+            // the mono tier a solid rule is indistinguishable from a low bar,
+            // since both render a dim `⣀`.
+            let empty = left.max(right) == 0;
+            match rule_level {
+                Some(lvl) if empty && i % 2 == 0 => {
+                    Span::styled(set.rule_glyph(lvl).to_string(), theme.chrome_style())
+                }
+                _ => Span::styled(set.glyph(left, right).to_string(), theme.heat_style(peak)),
+            }
         })
         .collect::<Vec<_>>();
     Line::from(spans)
