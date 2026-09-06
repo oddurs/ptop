@@ -457,7 +457,18 @@ fn draw_timeline(f: &mut Frame, area: Rect, app: &App) {
     ));
 
     if lines.len() < inner_h {
-        let span = fmt_lag(Duration::from_secs(window.len() as u64));
+        // Real elapsed time, not sample count. A caption saying `4m32s shown`
+        // beside a seam saying `time missing` is the graph contradicting
+        // itself in adjacent characters — the window really did span nine
+        // minutes, and 272 of those seconds are the gap.
+        let span = fmt_lag(
+            window
+                .first()
+                .zip(window.last())
+                .and_then(|(a, b)| b.at.duration_since(a.at).ok())
+                .unwrap_or_default(),
+        );
+        let per_slot = fmt_lag(app.interval * zoom as u32);
         // Only the identification half is dropped when the gutter names the
         // series. The span, the slot size and the keys are not a legend and
         // are not duplicated anywhere else.
@@ -471,16 +482,28 @@ fn draw_timeline(f: &mut Frame, area: Rect, app: &App) {
         } else {
             String::new()
         };
-        lines.push(Line::from(Span::styled(
-            format!("{ident}{span} shown, {zoom}s/slot{gap_note} — ←/→ scrub, +/- zoom"),
-            app.theme.dim_style(),
-        )));
+        // Drop the key hints before letting anything be cut mid-word. The
+        // scale is a fact about what is on screen and the gap note is a
+        // correction to it; the keys are a reminder, and a reminder is the
+        // right thing to lose first. Without this the gap note cost about
+        // sixteen columns and silently truncated `+/- zoom` on a narrow panel.
+        let facts = format!("{ident}{span} shown, {per_slot}/slot{gap_note}");
+        let keys = " — ←/→ scrub, +/- zoom";
+        let legend = if facts.chars().count() + keys.chars().count() <= inner_w {
+            facts + keys
+        } else {
+            facts
+        };
+        lines.push(Line::from(Span::styled(legend, app.theme.dim_style())));
     }
 
+    // Retained is what the clock says; capacity is what the buffer will hold at
+    // the nominal rate, which is a claim about the future and so is nominal by
+    // nature. Mixing a measured figure with a projected one is deliberate.
     let title = format!(
         " timeline — {} of {} buffered ",
-        fmt_lag(Duration::from_secs(app.history.len() as u64)),
-        fmt_lag(Duration::from_secs(app.history.capacity() as u64)),
+        fmt_lag(app.history.span()),
+        fmt_lag(app.interval * app.history.capacity() as u32),
     );
 
     let mut all = vec![divider(&title, area.width, &app.theme)];
@@ -528,10 +551,20 @@ fn glyph_row(g: GraphRow, theme: &Theme) -> Line<'static> {
         .enumerate()
         .map(|(i, cell)| {
             // A seam where time is missing, drawn full height and in chrome so
-            // it cannot be read as a bar. It costs this cell's samples, which
-            // is the right trade: one hidden column out of a hundred is a small
-            // loss, and a graph that silently compresses twenty minutes of
-            // sleep into one cell of idle is wrong about the axis itself.
+            // it cannot be read as a bar.
+            //
+            // It costs the whole cell — `spc * zoom` samples, so two at the
+            // default and sixteen at maximum zoom on a braille terminal. That
+            // is a real loss and worth naming: a machine that has just woken
+            // or just unwedged is exactly when a spike is likely, and a spike
+            // in the sample beside the resumed one is hidden by this.
+            //
+            // Taken anyway, because the alternative is worse in kind rather
+            // than in degree. Compressing twenty minutes of absence into one
+            // cell of idle is not a lost sample, it is a graph whose x-axis is
+            // untrue, and every reading taken from it after that is wrong. The
+            // cost also scales the right way: the more samples a cell covers,
+            // the more time the seam is standing for.
             if gaps
                 .get(i * spc..(i * spc + spc).min(gaps.len()))
                 .is_some_and(|g| g.iter().any(|&f| f))

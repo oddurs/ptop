@@ -271,14 +271,21 @@ fn run(
     app: &mut App,
     collector: &mut impl Collector,
 ) -> io::Result<()> {
-    let mut last_sample = Instant::now();
+    // A fixed cadence, not "one interval after the last sample finished".
+    //
+    // Restarting the clock after collection adds the collect and draw time to
+    // every period, so the timestamps drift steadily away from the rate they
+    // claim — on a box with thousands of processes, far enough that the gap
+    // detector would see a missed tick on every single cell and paint the
+    // whole graph as seams. The interval is a schedule, so schedule against it.
+    let mut next_sample = Instant::now() + SAMPLE_INTERVAL;
 
     loop {
         terminal.draw(|f| ui::draw(f, app))?;
 
         // Poll with whatever is left of the sample interval: input stays
         // responsive without spinning, and sampling stays on schedule.
-        let timeout = SAMPLE_INTERVAL.saturating_sub(last_sample.elapsed());
+        let timeout = next_sample.saturating_duration_since(Instant::now());
         if event::poll(timeout)?
             && let Event::Key(key) = event::read()?
             && key.kind == KeyEventKind::Press
@@ -286,12 +293,22 @@ fn run(
             handle_key(app, key.code, key.modifiers);
         }
 
-        if last_sample.elapsed() >= SAMPLE_INTERVAL {
+        if Instant::now() >= next_sample {
             // Sampling continues while paused — that is the whole point. The
             // cursor stays put, the buffer keeps filling behind it.
             app.push(collector.sample(app.needs())?);
             app.clamp_selection();
-            last_sample = Instant::now();
+            next_sample += SAMPLE_INTERVAL;
+            // Falling a whole interval behind means the host cannot sustain
+            // the rate. Resync rather than catch up: catching up would sample
+            // flat out until the backlog cleared, which is the worst thing to
+            // do to the loaded box that caused the backlog. The samples really
+            // are further apart than the nominal rate, and the timeline says
+            // so — that is what the seam is for.
+            let now = Instant::now();
+            if next_sample <= now {
+                next_sample = now + SAMPLE_INTERVAL;
+            }
         }
 
         if app.should_quit {

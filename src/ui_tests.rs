@@ -2407,21 +2407,49 @@ fn an_idle_stretch_is_not_mistaken_for_a_gap() {
     );
 }
 
+/// The slot size the timeline legend claims, e.g. `2s`.
+///
+/// Read back from the rendered frame rather than computed, because it is the
+/// observable that proves zoom reached the drawing at all.
+fn slot_size(app: &App, w: u16, h: u16) -> String {
+    render_lines(app, w, h)
+        .into_iter()
+        .find_map(|l| {
+            let (head, _) = l.split_once("/slot")?;
+            Some(head.rsplit(", ").next()?.trim().to_string())
+        })
+        .expect("the timeline legend names its slot size")
+}
+
 #[test]
 fn a_gap_survives_being_zoomed_out() {
     // The failure guarded against is aggregation quietly dropping the gap at
     // the zoom level where the whole buffer fits on screen — exactly the view
     // you would be in to notice one.
+    //
+    // The buffer has to be big enough that zoom does something. An earlier
+    // version of this test used 80 samples against 192 slots, where
+    // `effective_zoom` clamps every level to 1: it asserted four times that
+    // zoom 1 works, and never reached the aggregation it claimed to test.
+    // Hence the slot-size check below, which fails if that comes back.
     let mut app = App::new(600);
-    history_with_gap(&mut app, 40, 300, 40);
+    history_with_gap(&mut app, 400, 300, 60);
+
+    let mut sizes = std::collections::HashSet::new();
     for _ in 0..crate::app::ZOOM_LEVELS.len() {
         assert!(
             !seam_columns(&app, 100, 40).is_empty(),
             "gap vanished at zoom {}",
             app.zoom()
         );
+        sizes.insert(slot_size(&app, 100, 40));
         app.zoom_out();
     }
+    assert!(
+        sizes.len() > 1,
+        "every zoom level drew the same slot size {sizes:?} — the buffer is \
+         too small for zoom to have any effect, so nothing was aggregated"
+    );
 }
 
 #[test]
@@ -2478,5 +2506,51 @@ fn show_gap_frame() {
     history_with_gap(&mut app, 40, 300, 40);
     for line in render_lines(&app, 92, 26) {
         println!("|{line}|");
+    }
+}
+
+#[test]
+fn the_caption_reports_real_time_not_sample_count() {
+    // A caption saying `1m20s shown` beside a seam saying `time missing` is
+    // the graph contradicting itself in adjacent characters. These 80 samples
+    // span about 380 seconds, because 300 of them were never taken.
+    let mut app = App::new(600);
+    history_with_gap(&mut app, 40, 300, 40);
+    let caption = render_lines(&app, 100, 40)
+        .into_iter()
+        .find(|l| l.contains(" shown, "))
+        .expect("the timeline captions its span");
+    let span = caption.split_whitespace().next().unwrap();
+
+    // Asserted as a range, not a figure: the fixture builds its timestamps
+    // from repeated `now()` calls, so the span is 379s give or take the time
+    // the loop itself took. Counting samples would say 1m20s, which is nowhere
+    // near this window, so the bug is still caught with room to spare.
+    let (m, s) = span.split_once('m').expect("minutes");
+    let secs: u64 =
+        m.parse::<u64>().unwrap() * 60 + s.trim_end_matches('s').parse::<u64>().unwrap();
+    assert!(
+        (370..390).contains(&secs),
+        "caption {span:?} = {secs}s; the window spans ~380s of wall clock, \
+         and 80s only if you count samples and call each one a second"
+    );
+}
+
+#[test]
+fn the_legend_degrades_rather_than_truncating_a_word() {
+    // The gap note costs about sixteen columns, which used to push `+/- zoom`
+    // off the panel mid-word. Losing the whole hint is fine; losing half of it
+    // reads as a rendering bug.
+    let mut app = App::new(600);
+    history_with_gap(&mut app, 40, 300, 40);
+    for w in 30..=110u16 {
+        let legend = render_lines(&app, w, 40)
+            .into_iter()
+            .find(|l| l.contains(" shown, "))
+            .unwrap_or_default();
+        assert!(
+            !legend.contains('←') || legend.contains("+/- zoom"),
+            "at w={w} the key hint was cut: {legend:?}"
+        );
     }
 }

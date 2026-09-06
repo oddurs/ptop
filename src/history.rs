@@ -77,6 +77,19 @@ impl History {
         newest.at.duration_since(cur.at).unwrap_or_default()
     }
 
+    /// Wall-clock time covered by the retained samples.
+    ///
+    /// Read from the timestamps, not from `len() * interval`. Those agree only
+    /// on a machine that never slept and never fell behind — the two cases the
+    /// timeline now draws a seam for. A buffer whose graph announces that time
+    /// is missing must not caption itself with a duration that excludes it.
+    pub fn span(&self) -> std::time::Duration {
+        let (Some(first), Some(last)) = (self.samples.front(), self.samples.back()) else {
+            return std::time::Duration::ZERO;
+        };
+        last.at.duration_since(first.at).unwrap_or_default()
+    }
+
     pub fn iter(&self) -> impl Iterator<Item = &Sample> {
         self.samples.iter()
     }
@@ -209,6 +222,13 @@ pub fn peak_slots(values: &[f32], zoom: usize, slots: usize) -> Vec<Option<f32>>
 /// is unaccounted for. Index 0 is never a gap: it has no predecessor here, and
 /// inventing one would put a seam at the left edge of every fresh buffer.
 pub fn gaps_in(times: &[std::time::SystemTime], nominal: std::time::Duration) -> Vec<bool> {
+    // A zero nominal interval has no notion of a missed tick, and `>= 0` would
+    // otherwise flag every sample and render the whole graph as seams. Item
+    // 0013 makes this number configurable, so the degenerate value stops being
+    // hypothetical the moment someone writes `interval = 0`.
+    if nominal.is_zero() {
+        return vec![false; times.len()];
+    }
     let limit = nominal.saturating_mul(2);
     times
         .iter()
