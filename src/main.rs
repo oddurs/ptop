@@ -124,7 +124,12 @@ fn main() -> io::Result<()> {
         &args,
     )
     .unwrap_or_else(|bad| {
-        eprintln!("ptop: --{bad}");
+        // Before exiting, not after: a config file that could not be *read* is
+        // reported here too, and dropping that warning because a flag was also
+        // wrong would send the user off to fix the flag and rerun into the
+        // same silently-ignored config.
+        flush(&warnings);
+        eprintln!("ptop: {}", bad.as_flag());
         std::process::exit(2);
     });
     warnings.extend(file_warnings);

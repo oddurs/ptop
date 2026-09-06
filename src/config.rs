@@ -40,8 +40,13 @@ impl Settings {
 /// Braille unless we are on a real Linux console, whose font has no braille
 /// glyphs. btop makes the same check (`btop.cpp:815`).
 fn default_glyphs() -> GlyphSet {
-    match std::env::var("TERM").as_deref() {
-        Ok("linux") => GlyphSet::Ascii,
+    default_glyphs_for(std::env::var("TERM").ok().as_deref())
+}
+
+/// The environment split out, so the rule is testable. See [`path_from`].
+fn default_glyphs_for(term: Option<&str>) -> GlyphSet {
+    match term {
+        Some("linux") => GlyphSet::Ascii,
         _ => GlyphSet::Braille,
     }
 }
@@ -108,6 +113,24 @@ impl std::fmt::Display for Bad {
     }
 }
 
+impl Bad {
+    /// The same complaint, spelled the way the command line spells settings.
+    ///
+    /// `--glyphs=crayon: expected braille, block or ascii` rather than the
+    /// file's `` `glyphs`: expected … ``. Prefixing the file form with `--`
+    /// produced ``--`glyphs`: expected …``, which is neither.
+    pub fn as_flag(&self) -> String {
+        match self {
+            Self::UnknownKey { .. } => self.to_string(),
+            Self::Value {
+                key,
+                value,
+                expected,
+            } => format!("--{key}={value}: expected {expected}"),
+        }
+    }
+}
+
 /// Apply one setting, wherever it came from.
 ///
 /// The single entry point for both the config file and the command line, so
@@ -159,7 +182,14 @@ pub fn path_from(xdg: Option<OsString>, home: Option<OsString>) -> Option<PathBu
     let base = xdg
         .map(PathBuf::from)
         .filter(|p| p.is_absolute())
-        .or_else(|| home.map(|h| PathBuf::from(h).join(".config")))?;
+        .or_else(|| {
+            // Relative here is the same hazard, and it happens in stripped-down
+            // containers and under `env -i`: ptop would read a different file
+            // depending on the directory it was launched from.
+            home.map(PathBuf::from)
+                .filter(|p| p.is_absolute())
+                .map(|h| h.join(".config"))
+        })?;
     Some(base.join("ptop").join("ptop.conf"))
 }
 
@@ -241,6 +271,10 @@ pub fn apply_file(settings: &mut Settings, text: &str, origin: &str, warnings: &
         };
         let key = key.trim();
         let value = strip_comment(value.trim());
+        if key.is_empty() {
+            warn(format!("expected `key = value`, found `{trimmed}`"));
+            continue;
+        }
         if value.is_empty() {
             warn(format!("`{key}` has no value"));
             continue;
@@ -258,10 +292,13 @@ pub fn apply_file(settings: &mut Settings, text: &str, origin: &str, warnings: &
 /// whitespace before the marker is what makes the two tell apart without a
 /// special case for hex.
 fn strip_comment(value: &str) -> &str {
-    match value
-        .char_indices()
-        .find(|&(i, c)| c == '#' && i > 0 && value[..i].ends_with(char::is_whitespace))
-    {
+    // …and only if it is one token. `#5ccfe6` is a colour; `# not set yet` is
+    // a comment on a line whose value is missing, and saying *that* beats
+    // reporting a malformed colour on a line that never named one.
+    let opens_value = value.starts_with('#') && !value[1..].starts_with(char::is_whitespace);
+    match value.char_indices().find(|&(i, c)| {
+        c == '#' && (i > 0 || !opens_value) && (i == 0 || value[..i].ends_with(char::is_whitespace))
+    }) {
         Some((i, _)) => value[..i].trim_end(),
         None => value,
     }
@@ -403,6 +440,53 @@ mod tests {
     }
 
     #[test]
+    fn a_line_missing_half_of_itself_says_so() {
+        // `theme = # not set yet` used to report a malformed *colour*, because
+        // the leading-`#` exemption fired on a line that never named a value.
+        // The message has to describe the actual problem to be worth printing.
+        let (_, w) = apply("theme = # not set yet\n= mono\n");
+        assert_eq!(w.len(), 2, "{w:?}");
+        assert!(w[0].contains("no value"), "{}", w[0]);
+        assert!(w[1].contains("key = value"), "{}", w[1]);
+    }
+
+    #[test]
+    fn a_flag_complaint_is_spelled_like_a_flag() {
+        // Prefixing the file's rendering with `--` produced
+        // ``--`glyphs`: expected …``, which is neither form.
+        let bad = apply_one("glyphs", "crayon");
+        assert_eq!(
+            bad.as_flag(),
+            "--glyphs=crayon: expected braille, block or ascii"
+        );
+        assert_eq!(
+            bad.to_string(),
+            "`glyphs`: expected braille, block or ascii, found `crayon`"
+        );
+    }
+
+    fn apply_one(key: &str, value: &str) -> Bad {
+        let mut s = Settings {
+            glyphs: GlyphSet::Braille,
+            tier: Tier::TrueColor,
+            palette: Palette::Safe,
+        };
+        super::apply(&mut s, key, value).expect_err("value should be rejected")
+    }
+
+    #[test]
+    fn a_linux_console_gets_ascii() {
+        // A real console has no braille glyphs. This moved out of `main` with
+        // the rest of the defaults and arrived here untested.
+        assert_eq!(default_glyphs_for(Some("linux")), GlyphSet::Ascii);
+        assert_eq!(
+            default_glyphs_for(Some("xterm-256color")),
+            GlyphSet::Braille
+        );
+        assert_eq!(default_glyphs_for(None), GlyphSet::Braille);
+    }
+
+    #[test]
     fn a_relative_xdg_config_home_is_ignored() {
         // The XDG spec requires it: honouring a relative path would make ptop
         // read a different config depending on where it was launched from.
@@ -415,6 +499,8 @@ mod tests {
             path_from(os("/xdg"), os("/home/someone")),
             Some(PathBuf::from("/xdg/ptop/ptop.conf"))
         );
+        // A relative HOME is the same hazard, and happens under `env -i`.
+        assert_eq!(path_from(None, os("relative")), None);
         // No HOME and no XDG is not a crash; it is simply no config file.
         assert_eq!(path_from(None, None), None);
     }
