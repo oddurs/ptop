@@ -43,7 +43,8 @@ USAGE:
     --window=SPAN   history retained, as time not samples (default 10m)
     --warn=PCT      where 'getting busy' begins (default 50)
     --critical=PCT  where 'in trouble' begins (default 80). Must exceed --warn.
-    --theme=NAME    safe (default), classic, or auto. 'safe' replaces green with
+    --theme=NAME    a built-in (safe, classic, auto) or a file in
+                    ~/.config/ptop/themes/NAME.theme. 'safe' replaces green with
                     cyan: green/yellow separates by only dE 3.7 under simulated
                     protanopia, against a target of 8, and red-green deficiency
                     affects roughly 8% of men. 'classic' restores green/yellow/red.
@@ -65,6 +66,18 @@ CONFIG:
 
     An unknown key warns, naming the key and the line, and ptop starts anyway.
     One typo should not cost you the tool.
+
+THEMES:
+    ~/.config/ptop/themes/NAME.theme, one line per colour. Every line is
+    optional — a theme inherits `safe` for anything it does not name:
+
+        ok         = #8fbcbb    # hex,
+        series_cpu = 67         # a 256-colour index,
+        chrome     = darkgray   # or an ANSI name
+
+    Tokens: ok, warn, critical, series_cpu, series_mem, chrome, text,
+    text_dim, selection_bg, live. The built-ins ship as files too, so the way
+    to learn the format is to copy one.
 
 OPTIONS:
     -h, --help      show this help
@@ -122,8 +135,11 @@ fn main() -> io::Result<()> {
     let no_color = std::env::var_os("NO_COLOR").is_some_and(|v| !v.is_empty());
     let (settings, positional, file_warnings) = config::resolve(
         config::Settings::detect(),
-        file.as_ref().map(|(o, t)| (o.as_str(), t.as_str())),
-        no_color,
+        config::Sources {
+            file: file.as_ref().map(|(o, t)| (o.as_str(), t.as_str())),
+            no_color,
+            themes: &config::read_theme,
+        },
         &args,
     )
     .unwrap_or_else(|bad| {
@@ -182,8 +198,39 @@ fn main() -> io::Result<()> {
     let mut app = App::new(settings.history_len());
     app.interval = settings.interval;
     app.glyphs = settings.glyphs;
-    app.theme = theme::Theme::new(settings.palette, settings.tier)
-        .with_thresholds(settings.warn, settings.critical);
+    let (theme, skipped) = theme::Theme::new(settings.palette, settings.tier)
+        .with_thresholds(settings.warn, settings.critical)
+        .with_overrides(&settings.overrides);
+    app.theme = theme;
+    // Said once rather than per colour: a 256-colour terminal reading a
+    // true-colour theme would otherwise print ten near-identical lines, and
+    // the useful fact is which terminal you are on, not which token was first.
+    if !skipped.is_empty() {
+        // Named, not counted. "3 colours were dropped" tells a user they have
+        // a problem; naming the tokens and what they kept instead tells them
+        // which lines to rewrite, which is the only thing they can act on.
+        let kept: Vec<String> = skipped
+            .iter()
+            .map(|&tok| {
+                format!(
+                    "{} = {}",
+                    tok.name(),
+                    theme::write_color(tok.get(&app.theme))
+                )
+            })
+            .collect();
+        warnings.push(config::Warning(format!(
+            "theme `{}`: this terminal is {:?} and cannot show {}; keeping {}",
+            settings.theme,
+            settings.tier,
+            skipped
+                .iter()
+                .map(|t| t.name())
+                .collect::<Vec<_>>()
+                .join(", "),
+            kept.join(", "),
+        )));
+    }
 
     // Collect once before drawing so the first frame has real numbers. CPU
     // still reads zero — there is no previous counter to diff against yet.

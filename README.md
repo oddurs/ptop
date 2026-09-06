@@ -254,6 +254,50 @@ One table defines every setting once, and both the file and the command line
 drive it, so `theme = classic` and `--theme=classic` cannot come to disagree
 about what a value means.
 
+### Themes
+
+The palette is compiled in, but it is not the only one you can have. A theme is
+one file, one line per colour, in `~/.config/ptop/themes/NAME.theme`:
+
+```ini
+# ~/.config/ptop/themes/nord.theme
+ok         = #8fbcbb    # hex,
+series_cpu = 67         # a 256-colour index,
+chrome     = darkgray   # or an ANSI name
+```
+
+**Every line is optional.** A theme inherits `safe` for anything it does not
+name, so overriding two colours is two lines. That is the whole reason btop
+ships 41 themes and htop, which hardcodes eight in C, has never gained a ninth:
+the barrier decides whether a theme library exists.
+
+The tokens are exactly the ten the palette was built around — `ok`, `warn`,
+`critical`, `series_cpu`, `series_mem`, `chrome`, `text`, `text_dim`,
+`selection_bg`, `live`. Nothing new is invented for user themes; a vocabulary
+the code did not already use would be a second one to keep in step with the
+first.
+
+**The built-ins ship as files too**, in [`themes/`](themes/), so the way to
+learn the format is to copy one — and a test asserts they match the compiled
+palettes colour for colour, so they cannot quietly drift.
+
+A built-in name always wins over a file. A `safe.theme` in your themes
+directory would otherwise silently replace the palette everything else in this
+project is measured against.
+
+**A colour the terminal cannot show is left alone and reported, not
+approximated.** Hex needs a true-colour terminal, an index needs 256 colours, a
+name works anywhere, and monochrome ignores all of them:
+
+```
+ptop: theme `nord`: this terminal is Ansi16 and cannot show ok, series_cpu;
+      keeping ok = cyan, series_cpu = lightblue
+```
+
+Squeezing 24-bit hex into sixteen slots would destroy exactly the separation
+the palettes were measured for — and those sixteen slots belong to your
+terminal theme, not to ptop.
+
 ### Sample rate and window
 
 `interval` is the time between samples; `window` is how much history to keep,
