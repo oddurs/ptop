@@ -205,31 +205,14 @@ fn main() -> io::Result<()> {
     // Said once rather than per colour: a 256-colour terminal reading a
     // true-colour theme would otherwise print ten near-identical lines, and
     // the useful fact is which terminal you are on, not which token was first.
-    if !skipped.is_empty() {
-        // Named, not counted. "3 colours were dropped" tells a user they have
-        // a problem; naming the tokens and what they kept instead tells them
-        // which lines to rewrite, which is the only thing they can act on.
-        let kept: Vec<String> = skipped
-            .iter()
-            .map(|&tok| {
-                format!(
-                    "{} = {}",
-                    tok.name(),
-                    theme::write_color(tok.get(&app.theme))
-                )
-            })
-            .collect();
-        warnings.push(config::Warning(format!(
-            "theme `{}`: this terminal is {:?} and cannot show {}; keeping {}",
-            settings.theme,
-            settings.tier,
-            skipped
-                .iter()
-                .map(|t| t.name())
-                .collect::<Vec<_>>()
-                .join(", "),
-            kept.join(", "),
-        )));
+    if let Some(note) = config::theme_note(
+        settings.tier,
+        &settings.theme,
+        &app.theme,
+        &settings.overrides,
+        &skipped,
+    ) {
+        warnings.push(config::Warning(note));
     }
 
     // Collect once before drawing so the first frame has real numbers. CPU

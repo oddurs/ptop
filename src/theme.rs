@@ -1213,6 +1213,10 @@ impl Tier {
     pub fn needed_for(c: Color) -> Tier {
         match c {
             Color::Rgb(..) => Tier::TrueColor,
+            // Indices 0-15 *are* the ANSI slots: `ok = 6` and `ok = cyan` name
+            // the same thing, and a 16-colour terminal renders both. Only the
+            // cube above them needs a 256-colour terminal.
+            Color::Indexed(0..=15) => Tier::Ansi16,
             Color::Indexed(..) => Tier::Ansi256,
             _ => Tier::Ansi16,
         }

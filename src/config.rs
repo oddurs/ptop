@@ -29,6 +29,14 @@ pub struct Settings {
     /// Whether it resolves is settled in [`resolve`], which is where the
     /// loader is — the key table cannot read files.
     pub theme: String,
+    /// Where `theme` was last set, as `file:line`, when that was a file.
+    ///
+    /// Every other setting is judged where it is read, so the line number is
+    /// still in hand. A theme name can only be judged once something can look
+    /// for the file, which is after the whole config has been parsed — so this
+    /// is the one key that has to carry its origin forward. Without it a bad
+    /// theme is the only config error that cannot point at a line.
+    pub theme_origin: Option<String>,
     /// Filled in by [`resolve`]: the built-in to start from, and the user's
     /// colours to write over it.
     pub palette: Palette,
@@ -51,6 +59,7 @@ impl Settings {
             glyphs: default_glyphs(),
             tier: Tier::detect(),
             theme: Palette::default().name().to_string(),
+            theme_origin: None,
             palette: Palette::default(),
             overrides: Vec::new(),
             warn: Theme::DEFAULT_WARN_PCT,
@@ -94,6 +103,7 @@ impl Settings {
             glyphs: GlyphSet::Braille,
             tier: Tier::TrueColor,
             theme: Palette::Safe.name().to_string(),
+            theme_origin: None,
             palette: Palette::Safe,
             overrides: Vec::new(),
             warn: Theme::DEFAULT_WARN_PCT,
@@ -308,6 +318,7 @@ pub fn apply(settings: &mut Settings, key: &str, value: &str) -> Result<(), Bad>
 }
 
 /// Something ptop could not use, and where it came from.
+#[derive(Debug)]
 ///
 /// Carried rather than printed at the point of discovery: config is read before
 /// the alternate screen opens, and anything written to the terminal then is
@@ -417,6 +428,9 @@ pub fn resolve(
         match a.strip_prefix("--").and_then(|f| f.split_once('=')) {
             Some((key, value)) if KEYS.iter().any(|(k, _)| *k == key) => {
                 apply(&mut settings, key, value)?;
+                if key == "theme" {
+                    settings.theme_origin = None;
+                }
             }
             _ => positional.push(a.clone()),
         }
@@ -439,8 +453,16 @@ pub fn resolve(
         }
         Err(why) if from_flag => return Err(Bad::Pair(why)),
         Err(why) => {
+            // Anchored to the line that named it, like every other config
+            // warning. A theme is resolved after the file is fully parsed, so
+            // without the remembered origin this is the one error that could
+            // not point at anything.
+            let at = settings
+                .theme_origin
+                .as_ref()
+                .map_or(String::new(), |o| format!("{o}: "));
             warnings.push(Warning(format!(
-                "{why} — using `{}`",
+                "{at}{why} — using `{}`",
                 Palette::default().name()
             )));
             settings.theme = Palette::default().name().to_string();
@@ -449,6 +471,57 @@ pub fn resolve(
     }
 
     Ok((settings, positional, warnings))
+}
+
+/// What to say about a theme this terminal could not fully use, if anything.
+///
+/// Here rather than in `main` so the wording is testable. It is the only part
+/// of theme handling a user sees when it goes right-ish, and there are two
+/// quite different things to say.
+pub fn theme_note(
+    tier: Tier,
+    name: &str,
+    theme: &Theme,
+    overrides: &[(Token, Color)],
+    skipped: &[Token],
+) -> Option<String> {
+    if overrides.is_empty() {
+        return None;
+    }
+    // Monochrome does not *fail* to show a theme, it declines to — a different
+    // thing to be told. Listing ten tokens it "cannot show" and ten
+    // replacements all reading `default` names no line the user could rewrite,
+    // and it would fire on every run under NO_COLOR, TERM=dumb, or no TERM at
+    // all, which is most of CI.
+    if tier == Tier::Mono {
+        return Some(format!(
+            "theme `{name}` is not used: this terminal is monochrome, where meaning \
+             never rests on colour anyway"
+        ));
+    }
+    if skipped.is_empty() {
+        return None;
+    }
+    // Named, not counted. "3 colours were dropped" tells a user they have a
+    // problem; naming them and what was kept instead tells them which lines to
+    // rewrite, which is the only thing they can act on.
+    Some(format!(
+        "theme `{name}`: this terminal is {tier:?} and cannot show {}; keeping {}",
+        skipped
+            .iter()
+            .map(|t| t.name())
+            .collect::<Vec<_>>()
+            .join(", "),
+        skipped
+            .iter()
+            .map(|&tok| format!(
+                "{} = {}",
+                tok.name(),
+                crate::theme::write_color(tok.get(theme))
+            ))
+            .collect::<Vec<_>>()
+            .join(", "),
+    ))
 }
 
 /// Reads a named theme, returning its origin and contents or why not.
@@ -481,7 +554,12 @@ fn resolve_theme(
     if let Some(builtin) = Palette::parse(name) {
         return Ok((builtin, Vec::new()));
     }
-    let (origin, text) = themes(name)?;
+    let (origin, text) = themes(name).map_err(|why| {
+        match closest_in(name, &[Palette::Safe.name(), Palette::Classic.name()]) {
+            Some(k) => format!("{why} (did you mean `{k}`?)"),
+            None => why,
+        }
+    })?;
     // Inheriting from `safe` rather than from nothing, so a theme that sets
     // two colours is two lines. Requiring all ten is why people do not write
     // themes.
@@ -629,8 +707,12 @@ pub fn read(warnings: &mut Vec<Warning>) -> Option<(String, String)> {
 /// lines: a config that refuses to load because of a single bad key is worse
 /// than one that ignores it and says so.
 pub fn apply_file(settings: &mut Settings, text: &str, origin: &str, warnings: &mut Vec<Warning>) {
-    for_each_setting(text, origin, warnings, |key, value| {
-        apply(settings, key, value).map_err(|bad| bad.to_string())
+    for_each_setting(text, origin, warnings, |key, value, line| {
+        apply(settings, key, value).map_err(|bad| bad.to_string())?;
+        if key == "theme" {
+            settings.theme_origin = Some(format!("{origin}:{line}"));
+        }
+        Ok(())
     });
 }
 
@@ -645,7 +727,7 @@ fn for_each_setting(
     text: &str,
     origin: &str,
     warnings: &mut Vec<Warning>,
-    mut f: impl FnMut(&str, &str) -> Result<(), String>,
+    mut f: impl FnMut(&str, &str, usize) -> Result<(), String>,
 ) {
     for (n, raw) in text.lines().enumerate() {
         let line = n + 1;
@@ -669,7 +751,7 @@ fn for_each_setting(
             warn(format!("`{key}` has no value"));
             continue;
         }
-        if let Err(why) = f(key, value) {
+        if let Err(why) = f(key, value, line) {
             warn(why);
         }
     }
@@ -686,7 +768,7 @@ fn for_each_setting(
 /// failing the file: the same rule as the config file, for the same reason.
 pub fn parse_theme(text: &str, origin: &str, warnings: &mut Vec<Warning>) -> Vec<(Token, Color)> {
     let mut out = Vec::new();
-    for_each_setting(text, origin, warnings, |key, value| {
+    for_each_setting(text, origin, warnings, |key, value, _| {
         let token = Token::parse(key).ok_or_else(|| {
             let hint = closest_in(key, &Token::ALL.map(Token::name))
                 .map_or(String::new(), |k| format!(" (did you mean `{k}`?)"));
@@ -730,13 +812,16 @@ fn closest(key: &str) -> Option<&'static str> {
 
 /// The nearest name in a set, or none if nothing is near enough.
 ///
-/// Bounded by half the candidate's length so a genuinely unrelated word gets
-/// no suggestion — a confidently wrong hint is worse than none.
+/// Two edits, the conventional threshold, rather than a bound that scales with
+/// the candidate's length. Scaling looked reasonable and was far too loose on
+/// short names: `nope` is three edits from `safe` on a four-letter word, and
+/// ptop offered it. A confidently wrong hint is worse than none, and it is
+/// worst when the tool sounds sure.
 fn closest_in(key: &str, names: &[&'static str]) -> Option<&'static str> {
     names
         .iter()
         .map(|&k| (distance(key, k), k))
-        .filter(|&(d, k)| d <= k.len() / 2 + 1)
+        .filter(|&(d, _)| d <= 2)
         .min()
         .map(|(_, k)| k)
 }
@@ -785,6 +870,9 @@ mod tests {
                 // palette is what `resolve` turns it into once it can see
                 // whether a file of that name exists.
                 theme: "classic".to_string(),
+                // …and the line it came from, kept because a theme is the one
+                // setting judged somewhere other than where it is read.
+                theme_origin: Some("conf:3".to_string()),
                 ..Settings::fixed()
             }
         );
@@ -858,6 +946,10 @@ mod tests {
 
     #[test]
     fn a_wild_guess_gets_no_suggestion() {
+        // Three edits on a four-letter word is not a near miss. ptop used to
+        // answer `theme = nope` with "did you mean `safe`?" — the name it was
+        // about to fall back to anyway.
+        assert_eq!(closest_in("nope", &["safe", "classic"]), None);
         // A confidently wrong hint is worse than none.
         assert_eq!(closest("supercalifragilistic"), None);
         assert_eq!(closest("colour"), Some("color"));
@@ -1382,6 +1474,69 @@ mod themes {
             "{}",
             w[0].0
         );
+    }
+
+    #[test]
+    fn a_bad_theme_in_the_file_points_at_its_line() {
+        // Every other config warning reads `conf:4: ...`. A theme is resolved
+        // after the whole file is parsed, so without carrying the origin
+        // forward this would be the one error that cannot point at anything.
+        let (_, w) = run(
+            &[],
+            Some("glyphs = block\ncolor = 256\ntheme = nope\n"),
+            &from(&[]),
+        )
+        .unwrap();
+        assert_eq!(w.len(), 1);
+        assert!(w[0].0.starts_with("conf:3: "), "{}", w[0].0);
+    }
+
+    #[test]
+    fn a_flag_theme_reports_no_file_line() {
+        // The flag is where it came from, so a stale line from the file would
+        // point at something that is not the problem.
+        let (s, _) = run(&["--theme=safe"], Some("theme = classic\n"), &from(&[])).unwrap();
+        assert_eq!(s.theme_origin, None);
+    }
+
+    #[test]
+    fn a_misspelt_builtin_is_guessed() {
+        // The commonest `--theme` typo. It used to be caught by the key table
+        // and lost its suggestion when theme names stopped validating there.
+        let err = run(&["--theme=clasic"], None, &from(&[])).unwrap_err();
+        assert!(err.to_string().contains("did you mean `classic`?"), "{err}");
+    }
+
+    #[test]
+    fn monochrome_says_one_thing_rather_than_ten() {
+        use crate::theme::Tier;
+        let overrides = Token::ALL.map(|t| (t, Color::Red)).to_vec();
+        let (theme, skipped) = Theme::new(Palette::Safe, Tier::Mono).with_overrides(&overrides);
+
+        let note = theme_note(Tier::Mono, "nord", &theme, &overrides, &skipped)
+            .expect("a mono user with a theme should hear something");
+        assert!(note.contains("monochrome"), "{note}");
+        assert!(
+            !note.contains("series_cpu"),
+            "mono listed every token it 'cannot show': {note}"
+        );
+
+        // No theme, nothing to say — this fires on every run under NO_COLOR.
+        assert_eq!(theme_note(Tier::Mono, "safe", &theme, &[], &[]), None);
+    }
+
+    #[test]
+    fn an_ansi_index_works_on_an_ansi_terminal() {
+        use crate::theme::Tier;
+        // 0-15 *are* the ANSI slots: `ok = 6` and `ok = cyan` name the same
+        // thing, and a 16-colour terminal renders both.
+        let overrides = vec![
+            (Token::Ok, Color::Indexed(6)),
+            (Token::Warn, Color::Indexed(222)),
+        ];
+        let (theme, skipped) = Theme::new(Palette::Safe, Tier::Ansi16).with_overrides(&overrides);
+        assert_eq!(skipped, vec![Token::Warn], "an ANSI slot was refused");
+        assert_eq!(Token::get(Token::Ok, &theme), Color::Indexed(6));
     }
 
     #[test]
