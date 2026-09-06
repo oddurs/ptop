@@ -812,10 +812,7 @@ fn the_rules_land_on_exactly_the_threshold_rows() {
     let mem_ceiling = crate::glyphs::ceiling_for(mem_frac * 100.0);
 
     let mut expected: Vec<usize> = Vec::new();
-    for pct in [
-        crate::theme::Theme::WARN_PCT,
-        crate::theme::Theme::CRITICAL_PCT,
-    ] {
+    for pct in [app.theme.warn_pct, app.theme.critical_pct] {
         if let Some((r, _)) = crate::glyphs::rule_position_scaled(pct, cpu_rows, cpu_ceiling) {
             expected.push(r);
         }
@@ -873,7 +870,7 @@ fn the_rule_is_dashed_so_it_cannot_be_read_as_data() {
     let buf = term.backend().buffer();
 
     let rule_y = 1 + crate::glyphs::rule_position_scaled(
-        crate::theme::Theme::CRITICAL_PCT,
+        app.theme.critical_pct,
         (((h as usize - 1).saturating_sub(2)).max(1) * 3 / 5).max(1),
         100.0,
     )
@@ -1583,27 +1580,93 @@ fn the_stated_scale_matches_the_colouring_it_describes() {
     // format literal as the code under test, so it pinned the title's shape
     // rather than its agreement with anything. This ties the printed numbers
     // to where `heat` actually changes colour.
-    let th = Theme::new(Palette::Safe, Tier::TrueColor);
-    assert_ne!(
-        th.heat(Theme::WARN_PCT - 0.1),
-        th.heat(Theme::WARN_PCT),
-        "the printed warn threshold is not where the colour changes"
-    );
-    assert_ne!(
-        th.heat(Theme::CRITICAL_PCT - 0.1),
-        th.heat(Theme::CRITICAL_PCT),
-        "the printed critical threshold is not where the colour changes"
-    );
+    //
+    // Run at the defaults *and* at configured thresholds. Now that the numbers
+    // can move, a legend that agrees with the colouring only at 50/80 is a
+    // legend that agrees by coincidence — this is the test that stops the two
+    // drifting apart, so it has to see them move.
+    for (warn, critical) in [
+        (Theme::DEFAULT_WARN_PCT, Theme::DEFAULT_CRITICAL_PCT),
+        (30.0, 65.0),
+        (0.1, 100.0),
+        // The case that used to slip through: with three integer thresholds
+        // the legend could round and the test would never notice. `warn 62.5`
+        // printed as `warn 62` claimed the colour changes half a point from
+        // where it does, and `warn = 49.6` printed as `50` — indistinguishable
+        // from the default the user was trying to move off.
+        (62.5, 87.5),
+        (49.6, 80.0),
+    ] {
+        let th = Theme::new(Palette::Safe, Tier::TrueColor).with_thresholds(warn, critical);
+        assert_ne!(
+            th.heat(th.warn_pct - 0.1),
+            th.heat(th.warn_pct),
+            "at {warn}/{critical} the printed warn threshold is not where the colour changes"
+        );
+        assert_ne!(
+            th.heat(th.critical_pct - 0.1),
+            th.heat(th.critical_pct),
+            "at {warn}/{critical} the printed critical threshold is not where the colour changes"
+        );
 
-    let mut app = App::new(60);
-    app.push(sample(50.0));
-    app.theme = th;
-    let mut term = Terminal::new(TestBackend::new(100, 30)).unwrap();
-    term.draw(|f| ui::draw(f, &app)).unwrap();
-    let buf = term.backend().buffer();
-    let row: String = (0..100u16).map(|x| buf[(x, 0)].symbol()).collect();
-    assert!(row.contains(&format!("warn {:.0}", Theme::WARN_PCT)));
-    assert!(row.contains(&format!("crit {:.0}", Theme::CRITICAL_PCT)));
+        let mut app = App::new(60);
+        app.push(sample(50.0));
+        app.theme = th;
+        let mut term = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        term.draw(|f| ui::draw(f, &app)).unwrap();
+        let buf = term.backend().buffer();
+        let row: String = (0..100u16).map(|x| buf[(x, 0)].symbol()).collect();
+        assert!(
+            row.contains(&format!("warn {warn}")),
+            "the header does not print warn {warn}: {row:?}"
+        );
+        assert!(
+            row.contains(&format!("crit {critical}")),
+            "the header does not print critical {critical}: {row:?}"
+        );
+    }
+}
+
+#[test]
+fn the_timeline_rules_move_with_the_thresholds() {
+    // The third reader of the pair. A rule drawn at a compiled-in 50 while the
+    // header says 30 would be the graph and its own legend disagreeing about
+    // where the boundary is.
+    //
+    // Compared over the timeline rows alone: comparing whole frames would pass
+    // on the header legend changing, which is a different reader and proves
+    // nothing about the rules. A 2% signal is used so the graph has headroom
+    // — the rule yields wherever data is present, so a full graph shows none
+    // whatever the thresholds are.
+    let mut app = App::new(600);
+    for i in (0..120).rev() {
+        app.push(sample_at(2.0, i as u64));
+    }
+    let graph = |app: &App| {
+        let rows = ui::timeline_rows_range(40);
+        render_lines(app, 100, 40)[rows.start as usize..rows.end as usize].join("\n")
+    };
+    // The glyphs the rule is actually drawn with, asked of the same glyph set
+    // that draws it rather than transcribed.
+    let rule_glyphs: Vec<char> = (1..=4).map(|k| app.glyphs.rule_glyph(k)).collect();
+    let rules_in = |s: &str| s.chars().filter(|c| rule_glyphs.contains(c)).count();
+
+    app.theme = Theme::new(Palette::Safe, Tier::TrueColor);
+    let at_default = graph(&app);
+    app.theme = app.theme.with_thresholds(3.0, 6.0);
+    let at_low = graph(&app);
+
+    // At 50/80 against an auto-scaled 10% ceiling both rules are off the scale
+    // and correctly suppressed; at 3/6 both fall inside it.
+    assert_eq!(
+        rules_in(&at_default),
+        0,
+        "a rule was drawn above the top of the axis"
+    );
+    assert!(
+        rules_in(&at_low) > 0,
+        "lowering the thresholds onto the visible scale drew no rule at all"
+    );
 }
 
 #[test]

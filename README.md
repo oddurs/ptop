@@ -198,10 +198,32 @@ erase an event, least of all at the zoom where the whole buffer is on screen.
 
 ```ini
 # ~/.config/ptop/ptop.conf
-theme  = classic
-glyphs = block      # comments run to the end of the line
-color  = 256
+theme    = classic
+glyphs   = block    # comments run to the end of the line
+color    = 256
+warn     = 65       # a build box is busy at 50% and perfectly fine
+critical = 90
 ```
+
+`warn` and `critical` are where the status colours change, where the timeline
+draws its threshold rules, and what the header legend prints. All three read
+the same pair, so the printed numbers cannot drift from the behaviour they
+describe — that agreement is the entire value of printing them.
+
+One rule governs the pair: **every status band must be reachable.** `heat`
+reads `[0, warn)` as ok, `[warn, critical)` as warn and `[critical, 100]` as
+critical, so `warn` above zero and `critical` above `warn` is exactly the
+condition for none of the three to be empty. That rejects an inverted pair, an
+equal one (the warn band would be empty), and `warn = 0` (nothing would ever be
+ok, and a rule would sit permanently along the bottom of both graphs).
+`critical = 100` is allowed: its band is the single point 100, but a machine
+really does reach 100% memory, so the band is reachable rather than empty.
+
+Out-of-range values are rejected rather than clamped — `warn = 150` is someone
+who has misunderstood the units, and quietly turning it into 100 hides that
+from them for as long as they use the tool. Fractions are fine, and the header
+prints them at the precision you gave: `warn = 62.5` shows `warn 62.5`, not a
+rounded `62` claiming the colour changes half a point from where it does.
 
 Precedence, lowest first: built-in default, config file, `NO_COLOR`, flag. The
 flag always wins, so a wrapper script can override a user's file without

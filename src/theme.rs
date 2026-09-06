@@ -164,7 +164,10 @@ impl Palette {
 }
 
 /// Named colours, grouped by the job each one does.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+// `Eq` would need the thresholds to be integers. They are compared against
+// percentages, which are not, and a float threshold is the honest type for a
+// value the user writes as `warn = 62.5`.
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Theme {
     pub tier: Tier,
 
@@ -191,11 +194,33 @@ pub struct Theme {
     // user's theme chooses it.
     pub selection_bg: Color,
     pub live: Color,
+
+    /// Where "getting busy" and "in trouble" begin, as percentages.
+    ///
+    /// On the theme rather than beside it because they are read wherever a
+    /// status hue is chosen — `heat`, `figure_style`, the timeline's threshold
+    /// rules and the header legend that prints them — and a threshold that
+    /// disagreed with the colour it selects would be worse than no threshold.
+    /// A build box and a latency-sensitive service care at very different
+    /// levels, and 50/80 was only ever a guess about which one you are.
+    pub warn_pct: f32,
+    pub critical_pct: f32,
 }
 
 impl Theme {
-    pub const WARN_PCT: f32 = 50.0;
-    pub const CRITICAL_PCT: f32 = 80.0;
+    pub const DEFAULT_WARN_PCT: f32 = 50.0;
+    pub const DEFAULT_CRITICAL_PCT: f32 = 80.0;
+
+    /// The same theme with the user's thresholds.
+    ///
+    /// Applied after construction rather than threaded through seven `const
+    /// fn` palettes, which are about hue and have nothing to say about where a
+    /// number becomes worrying.
+    pub fn with_thresholds(mut self, warn: f32, critical: f32) -> Self {
+        self.warn_pct = warn;
+        self.critical_pct = critical;
+        self
+    }
 
     /// The palette for a tier.
     /// Monochrome ignores the palette entirely — there are no hues to choose
@@ -218,6 +243,8 @@ impl Theme {
     const fn safe_ansi16() -> Self {
         Self {
             tier: Tier::Ansi16,
+            warn_pct: Self::DEFAULT_WARN_PCT,
+            critical_pct: Self::DEFAULT_CRITICAL_PCT,
             ok: Color::Cyan,
             warn: Color::Yellow,
             critical: Color::Red,
@@ -248,6 +275,8 @@ impl Theme {
     const fn safe_indexed() -> Self {
         Self {
             tier: Tier::Ansi256,
+            warn_pct: Self::DEFAULT_WARN_PCT,
+            critical_pct: Self::DEFAULT_CRITICAL_PCT,
             ok: Color::Indexed(80),
             warn: Color::Indexed(222),
             critical: Color::Indexed(203),
@@ -279,6 +308,8 @@ impl Theme {
     const fn safe_truecolor() -> Self {
         Self {
             tier: Tier::TrueColor,
+            warn_pct: Self::DEFAULT_WARN_PCT,
+            critical_pct: Self::DEFAULT_CRITICAL_PCT,
             ok: Color::Rgb(0x5c, 0xcf, 0xe6),
             warn: Color::Rgb(0xff, 0xd5, 0x80),
             critical: Color::Rgb(0xff, 0x66, 0x66),
@@ -297,6 +328,8 @@ impl Theme {
     const fn mono() -> Self {
         Self {
             tier: Tier::Mono,
+            warn_pct: Self::DEFAULT_WARN_PCT,
+            critical_pct: Self::DEFAULT_CRITICAL_PCT,
             ok: Color::Reset,
             warn: Color::Reset,
             critical: Color::Reset,
@@ -314,6 +347,8 @@ impl Theme {
     const fn ansi16() -> Self {
         Self {
             tier: Tier::Ansi16,
+            warn_pct: Self::DEFAULT_WARN_PCT,
+            critical_pct: Self::DEFAULT_CRITICAL_PCT,
             ok: Color::Green,
             warn: Color::Yellow,
             critical: Color::Red,
@@ -339,6 +374,8 @@ impl Theme {
     const fn indexed() -> Self {
         Self {
             tier: Tier::Ansi256,
+            warn_pct: Self::DEFAULT_WARN_PCT,
+            critical_pct: Self::DEFAULT_CRITICAL_PCT,
             ok: Color::Indexed(114),
             warn: Color::Indexed(179),
             critical: Color::Indexed(167),
@@ -361,6 +398,8 @@ impl Theme {
     const fn truecolor() -> Self {
         Self {
             tier: Tier::TrueColor,
+            warn_pct: Self::DEFAULT_WARN_PCT,
+            critical_pct: Self::DEFAULT_CRITICAL_PCT,
             ok: Color::Rgb(0x77, 0xca, 0x9b),
             warn: Color::Rgb(0xcb, 0xc0, 0x6c),
             critical: Color::Rgb(0xdc, 0x4c, 0x4c),
@@ -375,11 +414,11 @@ impl Theme {
         }
     }
 
-    /// Status colour for a percentage, on the shared 50/80 thresholds.
+    /// Status colour for a percentage, on the theme's configured thresholds.
     pub fn heat(&self, pct: f32) -> Color {
         match pct {
-            p if p >= Self::CRITICAL_PCT => self.critical,
-            p if p >= Self::WARN_PCT => self.warn,
+            p if p >= self.critical_pct => self.critical,
+            p if p >= self.warn_pct => self.warn,
             _ => self.ok,
         }
     }
@@ -395,8 +434,8 @@ impl Theme {
             return Style::default().fg(self.heat(pct));
         }
         match pct {
-            p if p >= Self::CRITICAL_PCT => Style::default().add_modifier(Modifier::BOLD),
-            p if p >= Self::WARN_PCT => Style::default(),
+            p if p >= self.critical_pct => Style::default().add_modifier(Modifier::BOLD),
+            p if p >= self.warn_pct => Style::default(),
             _ => Style::default().add_modifier(Modifier::DIM),
         }
     }

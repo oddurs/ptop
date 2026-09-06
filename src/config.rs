@@ -13,16 +13,19 @@
 //! one gets the other for free.
 
 use crate::glyphs::GlyphSet;
-use crate::theme::{Palette, Tier};
+use crate::theme::{Palette, Theme, Tier};
 use std::ffi::OsString;
 use std::path::PathBuf;
 
 /// Everything settable, resolved.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Debug)]
 pub struct Settings {
     pub glyphs: GlyphSet,
     pub tier: Tier,
     pub palette: Palette,
+    /// Where "getting busy" and "in trouble" begin, as percentages.
+    pub warn: f32,
+    pub critical: f32,
 }
 
 impl Settings {
@@ -33,6 +36,8 @@ impl Settings {
             glyphs: default_glyphs(),
             tier: Tier::detect(),
             palette: Palette::default(),
+            warn: Theme::DEFAULT_WARN_PCT,
+            critical: Theme::DEFAULT_CRITICAL_PCT,
         }
     }
 }
@@ -69,6 +74,14 @@ pub const KEYS: &[(&str, Apply)] = &[
         };
         Ok(())
     }),
+    ("warn", |s, v| {
+        s.warn = percentage(v)?;
+        Ok(())
+    }),
+    ("critical", |s, v| {
+        s.critical = percentage(v)?;
+        Ok(())
+    }),
     ("theme", |s, v| {
         s.palette = match v {
             "auto" | "default" => Palette::default(),
@@ -77,6 +90,18 @@ pub const KEYS: &[(&str, Apply)] = &[
         Ok(())
     }),
 ];
+
+/// A percentage, which is what every threshold in ptop is.
+///
+/// Rejecting the out-of-range value rather than clamping it: `warn = 150` is
+/// someone who has misunderstood the units, and silently turning it into 100
+/// hides that from them for as long as they use the tool.
+fn percentage(v: &str) -> Result<f32, &'static str> {
+    match v.parse::<f32>() {
+        Ok(n) if (0.0..=100.0).contains(&n) => Ok(n),
+        _ => Err("a percentage from 0 to 100"),
+    }
+}
 
 /// Why a setting could not be applied.
 #[derive(Debug)]
@@ -90,6 +115,8 @@ pub enum Bad {
         value: String,
         expected: &'static str,
     },
+    /// Two settings that are each fine and wrong together.
+    Pair(String),
 }
 
 impl std::fmt::Display for Bad {
@@ -109,6 +136,7 @@ impl std::fmt::Display for Bad {
             } => {
                 write!(f, "`{key}`: expected {expected}, found `{value}`")
             }
+            Self::Pair(why) => write!(f, "{why}"),
         }
     }
 }
@@ -121,7 +149,7 @@ impl Bad {
     /// produced ``--`glyphs`: expected …``, which is neither.
     pub fn as_flag(&self) -> String {
         match self {
-            Self::UnknownKey { .. } => self.to_string(),
+            Self::UnknownKey { .. } | Self::Pair(_) => self.to_string(),
             Self::Value {
                 key,
                 value,
@@ -219,6 +247,25 @@ pub fn resolve(
         settings.tier = Tier::Mono;
     }
 
+    // A check no single key can make on its own, so it cannot live in the
+    // table. Run twice, once per source, because the disposition differs: a
+    // file that leaves the pair meaningless falls back to the defaults with a
+    // warning, the way every other bad line does, while a flag that does it is
+    // fatal, the way every other bad flag is.
+    if let Err(why) = check_thresholds(&settings) {
+        // Naming both defaults because the recovery reverts both, including
+        // one the file may never have set: a file saying only `critical = 40`
+        // is put back to 50/80, and the warning is the user's only sign of it.
+        warnings.push(Warning(format!(
+            "{}: {why} — using the defaults, {} and {}",
+            origin_of(&file),
+            Theme::DEFAULT_WARN_PCT,
+            Theme::DEFAULT_CRITICAL_PCT,
+        )));
+        settings.warn = Theme::DEFAULT_WARN_PCT;
+        settings.critical = Theme::DEFAULT_CRITICAL_PCT;
+    }
+
     let mut positional = Vec::new();
     for a in args {
         // Flags are the same settings the file takes, so one table serves both
@@ -231,7 +278,43 @@ pub fn resolve(
             _ => positional.push(a.clone()),
         }
     }
+    check_thresholds(&settings).map_err(Bad::Pair)?;
+
     Ok((settings, positional, warnings))
+}
+
+/// The thresholds have to be usable as a pair, which neither key can tell
+/// alone.
+///
+/// Stated as one rule: every status band must be reachable. `heat` reads
+/// `[0, warn)` as ok, `[warn, critical)` as warn and `[critical, 100]` as
+/// critical, so `warn` above zero and `critical` above `warn` is exactly the
+/// condition for none of the three to be empty.
+///
+/// That covers `warn == critical`, which would leave the warn band empty, and
+/// `warn = 0`, which leaves nothing ever `ok` and draws a permanent rule along
+/// the bottom of both graphs. `critical = 100` is allowed: its band is the
+/// single point 100, but a machine really does reach 100% memory, so the band
+/// is reachable rather than empty.
+fn check_thresholds(s: &Settings) -> Result<(), String> {
+    if s.warn <= 0.0 {
+        return Err(format!(
+            "`warn` is {}, so nothing is ever ok; it must be above 0",
+            s.warn
+        ));
+    }
+    if s.warn >= s.critical {
+        return Err(format!(
+            "`warn` is {} and `critical` is {}; warn must be below critical",
+            s.warn, s.critical
+        ));
+    }
+    Ok(())
+}
+
+/// What to blame a cross-key problem on when the file is where it came from.
+fn origin_of(file: &Option<(&str, &str)>) -> String {
+    file.map_or_else(|| "ptop".to_string(), |(origin, _)| origin.to_string())
 }
 
 /// Read the user's config file, if there is one.
@@ -343,6 +426,8 @@ mod tests {
             glyphs: GlyphSet::Braille,
             tier: Tier::TrueColor,
             palette: Palette::Safe,
+            warn: Theme::DEFAULT_WARN_PCT,
+            critical: Theme::DEFAULT_CRITICAL_PCT,
         };
         let mut w = Vec::new();
         apply_file(&mut s, text, "conf", &mut w);
@@ -361,6 +446,8 @@ mod tests {
                 glyphs: GlyphSet::Block,
                 tier: Tier::Mono,
                 palette: Palette::Classic,
+                warn: Theme::DEFAULT_WARN_PCT,
+                critical: Theme::DEFAULT_CRITICAL_PCT,
             }
         );
     }
@@ -470,6 +557,8 @@ mod tests {
             glyphs: GlyphSet::Braille,
             tier: Tier::TrueColor,
             palette: Palette::Safe,
+            warn: Theme::DEFAULT_WARN_PCT,
+            critical: Theme::DEFAULT_CRITICAL_PCT,
         };
         super::apply(&mut s, key, value).expect_err("value should be rejected")
     }
@@ -515,6 +604,8 @@ mod precedence {
             glyphs: GlyphSet::Braille,
             tier: Tier::TrueColor,
             palette: Palette::Safe,
+            warn: Theme::DEFAULT_WARN_PCT,
+            critical: Theme::DEFAULT_CRITICAL_PCT,
         }
     }
 
@@ -573,5 +664,114 @@ mod precedence {
         // reach the usage message rather than being swallowed here.
         let (_, positional) = run(None, false, &["--wat=1", "--once"]);
         assert_eq!(positional, vec!["--wat=1", "--once"]);
+    }
+}
+
+#[cfg(test)]
+mod thresholds {
+    use super::*;
+
+    fn base() -> Settings {
+        Settings {
+            glyphs: GlyphSet::Braille,
+            tier: Tier::TrueColor,
+            palette: Palette::Safe,
+            warn: Theme::DEFAULT_WARN_PCT,
+            critical: Theme::DEFAULT_CRITICAL_PCT,
+        }
+    }
+
+    fn run(file: Option<&str>, args: &[&str]) -> Result<(Settings, Vec<Warning>), Bad> {
+        let args: Vec<String> = args.iter().map(|s| s.to_string()).collect();
+        resolve(base(), file.map(|t| ("conf", t)), false, &args).map(|(s, _, w)| (s, w))
+    }
+
+    #[test]
+    fn both_thresholds_are_settable() {
+        let (s, w) = run(Some("warn = 65\ncritical = 90\n"), &[]).unwrap();
+        assert!(
+            w.is_empty(),
+            "{:?}",
+            w.iter().map(|x| &x.0).collect::<Vec<_>>()
+        );
+        assert_eq!((s.warn, s.critical), (65.0, 90.0));
+
+        let (s, _) = run(None, &["--warn=20", "--critical=40"]).unwrap();
+        assert_eq!((s.warn, s.critical), (20.0, 40.0));
+    }
+
+    #[test]
+    fn a_threshold_outside_a_percentage_is_rejected() {
+        for bad in ["150", "-1", "", "half"] {
+            let (s, w) = run(Some(&format!("warn = {bad}\n")), &[]).unwrap();
+            assert_eq!(
+                s.warn,
+                Theme::DEFAULT_WARN_PCT,
+                "`warn = {bad}` was accepted"
+            );
+            assert_eq!(w.len(), 1, "`warn = {bad}` went unreported");
+        }
+        // 100 is the end of the range, not outside it.
+        assert_eq!(
+            run(Some("critical = 100\n"), &[]).unwrap().0.critical,
+            100.0
+        );
+        // …and a fraction is a percentage. The float type is the whole reason
+        // the header prints `{}` rather than `{:.0}`.
+        assert_eq!(run(Some("warn = 62.5\n"), &[]).unwrap().0.warn, 62.5);
+    }
+
+    #[test]
+    fn a_pair_that_makes_a_status_unreachable_is_rejected() {
+        // One rule — every status band must be reachable — so all three ways
+        // of breaking it are checked against it. `heat` reads [0, warn) as ok,
+        // [warn, critical) as warn and [critical, 100] as critical.
+        for (warn, critical) in [
+            (90.0, 80.0), // inverted: the warn band runs backwards
+            (80.0, 80.0), // equal: the warn band is empty
+            (0.0, 80.0),  // nothing is ever ok
+        ] {
+            let (s, w) = run(
+                Some(&format!("warn = {warn}\ncritical = {critical}\n")),
+                &[],
+            )
+            .unwrap();
+            assert_eq!(
+                (s.warn, s.critical),
+                (Theme::DEFAULT_WARN_PCT, Theme::DEFAULT_CRITICAL_PCT),
+                "{warn}/{critical} was left in place"
+            );
+            let said = |needle: &str| w.iter().any(|x| x.0.contains(needle));
+            assert!(
+                said(&format!("{warn}")),
+                "{warn}/{critical}: the warning does not name the offending value: {:?}",
+                w.iter().map(|x| &x.0).collect::<Vec<_>>()
+            );
+            // The recovery reverts *both*, including one the file may never
+            // have set, so the warning has to say what it fell back to.
+            assert!(
+                said("default") && said("50") && said("80"),
+                "{warn}/{critical}: the warning does not say what it fell back to: {:?}",
+                w.iter().map(|x| &x.0).collect::<Vec<_>>()
+            );
+        }
+    }
+
+    #[test]
+    fn a_bad_pair_from_flags_is_fatal_where_the_same_pair_in_a_file_is_not() {
+        // Same asymmetry as every other setting: the file is read every run,
+        // the flags were typed for this one.
+        assert!(run(Some("warn = 90\n"), &[]).is_ok());
+        assert!(run(None, &["--warn=90"]).is_err());
+    }
+
+    #[test]
+    fn a_flag_can_rescue_a_pair_the_file_got_wrong() {
+        // The file's pair is reverted, then the flag applies to the defaults —
+        // so `--critical=95` alongside a bad file still leaves a usable pair
+        // rather than compounding into a second failure.
+        let (s, w) = run(Some("warn = 90\n"), &["--critical=95"]).unwrap();
+        assert_eq!((s.warn, s.critical), (Theme::DEFAULT_WARN_PCT, 95.0));
+        assert_eq!(w.len(), 1);
     }
 }

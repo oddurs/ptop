@@ -2,10 +2,10 @@
 id: 4
 title: Configurable warn and critical thresholds
 type: feature
-status: backlog
+status: done
 milestone: v1.0
 created: 2026-09-05
-updated: 2026-09-05
+updated: 2026-09-06
 priority: p3
 effort: s
 area: config
