@@ -61,7 +61,7 @@ KEYS:
 ";
 
 /// Wall-clock seconds between samples.
-const SAMPLE_INTERVAL: Duration = Duration::from_secs(1);
+const SAMPLE_INTERVAL: Duration = app::DEFAULT_INTERVAL;
 /// Samples retained, so ten minutes of scrollback at one per second.
 const HISTORY_LEN: usize = 600;
 

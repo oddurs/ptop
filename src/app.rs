@@ -9,6 +9,14 @@ use crate::tree::{self, TreeRow};
 use std::cmp::Ordering;
 use std::collections::HashSet;
 
+/// Nominal time between samples.
+///
+/// Lives here rather than in `main` because the renderer needs it too: telling
+/// a gap in the buffer from an ordinary interval is a question about the
+/// nominal rate, and two copies of that number would drift the moment item
+/// 0013 makes it configurable.
+pub const DEFAULT_INTERVAL: std::time::Duration = std::time::Duration::from_secs(1);
+
 /// Samples per display slot.
 ///
 /// Kept modest deliberately: a slot count of ~200 (braille on a normal
@@ -92,6 +100,8 @@ pub struct App {
     zoom_idx: usize,
     pub glyphs: GlyphSet,
     pub theme: Theme,
+    /// Nominal time between samples, for spotting gaps in the buffer.
+    pub interval: std::time::Duration,
 }
 
 impl App {
@@ -109,6 +119,7 @@ impl App {
             zoom_idx: 0,
             glyphs: GlyphSet::default(),
             theme: Theme::default(),
+            interval: DEFAULT_INTERVAL,
         }
     }
 

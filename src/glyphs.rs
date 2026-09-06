@@ -73,6 +73,19 @@ impl GlyphSet {
         }
     }
 
+    /// The seam drawn where time is missing from the buffer.
+    ///
+    /// Deliberately not a data glyph. Box-drawing in a braille graph reads as
+    /// foreign the moment you see it, which is the point: a gap is a statement
+    /// about the axis, not about the machine. A dot pattern here would be one
+    /// more thing to tell apart from a low bar.
+    pub fn gap_glyph(self) -> char {
+        match self {
+            Self::Ascii => ':',
+            _ => '\u{250a}',
+        }
+    }
+
     /// Marker showing which half of a cell the scrub cursor sits on. Without
     /// this, packing two samples per cell would halve cursor precision.
     pub fn cursor_marker(self, right_half: bool) -> char {

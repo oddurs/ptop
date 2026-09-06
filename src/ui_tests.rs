@@ -2336,3 +2336,147 @@ fn measure_render_with_sparklines() {
         t0.elapsed() / n
     );
 }
+
+/// The rendered frame as one string per terminal row, for tests that care
+/// about geometry rather than the presence of a substring.
+fn render_lines(app: &App, w: u16, h: u16) -> Vec<String> {
+    let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
+    term.draw(|f| ui::draw(f, app)).unwrap();
+    let buf = term.backend().buffer().clone();
+    (0..h)
+        .map(|y| (0..w).map(|x| buf[(x, y)].symbol()).collect())
+        .collect()
+}
+
+/// A history where samples stop for a while and then resume.
+fn history_with_gap(app: &mut App, before: u64, gap: u64, after: u64) {
+    let total = before + gap + after;
+    for i in 0..before {
+        app.history.push(sample_at(5.0, total - i));
+    }
+    for i in 0..after {
+        app.history.push(sample_at(5.0, after - i));
+    }
+}
+
+/// Columns carrying a seam through the *graph*, which is the only place a
+/// seam means anything.
+///
+/// Counting rows inside the timeline rather than looking for the character
+/// anywhere on screen: the legend names the glyph too, so a substring search is
+/// satisfied by the legend alone and passes with the drawing removed. That cost
+/// one vacuous test to find out.
+fn seam_columns(app: &App, w: u16, h: u16) -> Vec<usize> {
+    let lines = render_lines(app, w, h);
+    let rows = ui::timeline_rows_range(h);
+    let seam = app.glyphs.gap_glyph();
+    (0..w as usize)
+        .filter(|&x| {
+            lines[rows.start as usize..rows.end as usize]
+                .iter()
+                .filter(|l| l.chars().nth(x) == Some(seam))
+                .count()
+                >= 4
+        })
+        .collect()
+}
+
+#[test]
+fn a_sampling_gap_is_visible_in_the_timeline() {
+    let mut app = App::new(600);
+    history_with_gap(&mut app, 40, 300, 40);
+    assert_eq!(
+        seam_columns(&app, 100, 40).len(),
+        1,
+        "expected exactly one full-height seam in the graph"
+    );
+}
+
+#[test]
+fn an_idle_stretch_is_not_mistaken_for_a_gap() {
+    // The distinguishing case the item asks for: the same flat 5% signal, the
+    // same length, sampled without interruption. A seam here would mean the
+    // feature cannot tell absence from quiet, which is the whole distinction.
+    let mut app = App::new(600);
+    for i in 0..80 {
+        app.history.push(sample_at(5.0, 80 - i));
+    }
+    assert!(
+        seam_columns(&app, 100, 40).is_empty(),
+        "an uninterrupted idle stretch drew a gap seam"
+    );
+}
+
+#[test]
+fn a_gap_survives_being_zoomed_out() {
+    // The failure guarded against is aggregation quietly dropping the gap at
+    // the zoom level where the whole buffer fits on screen — exactly the view
+    // you would be in to notice one.
+    let mut app = App::new(600);
+    history_with_gap(&mut app, 40, 300, 40);
+    for _ in 0..crate::app::ZOOM_LEVELS.len() {
+        assert!(
+            !seam_columns(&app, 100, 40).is_empty(),
+            "gap vanished at zoom {}",
+            app.zoom()
+        );
+        app.zoom_out();
+    }
+}
+
+#[test]
+fn gaps_are_missing_samples_not_slow_ones() {
+    use std::time::{Duration, SystemTime};
+    let base = SystemTime::UNIX_EPOCH;
+    let at = |ms: u64| base + Duration::from_millis(ms);
+    let nominal = Duration::from_secs(1);
+
+    // Jitter under load stretches an interval; it does not double it.
+    let jittery = [at(0), at(1000), at(2400), at(3900), at(5800)];
+    assert_eq!(
+        crate::history::gaps_in(&jittery, nominal),
+        vec![false; 5],
+        "collection jitter was reported as missing time"
+    );
+
+    // Two intervals means one tick went unobserved.
+    let slept = [at(0), at(1000), at(3000), at(4000)];
+    assert_eq!(
+        crate::history::gaps_in(&slept, nominal),
+        vec![false, false, true, false]
+    );
+
+    // A clock that stepped backwards is not a gap. Reporting it as one would
+    // paint seams across the whole graph of a machine that just synced NTP.
+    let stepped = [at(5000), at(1000), at(2000)];
+    assert_eq!(
+        crate::history::gaps_in(&stepped, nominal),
+        vec![false, false, false]
+    );
+}
+
+#[test]
+fn zooming_out_cannot_erase_a_gap() {
+    // Every position within a slot, since an aggregation that only checked the
+    // first or last sample would pass a single-position test.
+    for pos in 0..4 {
+        let mut flags = vec![false; 8];
+        flags[pos] = true;
+        let slots = crate::history::any_slots(&flags, 4, 2);
+        assert_eq!(
+            slots,
+            vec![true, false],
+            "a gap at position {pos} of a 4-sample slot was aggregated away"
+        );
+    }
+}
+
+#[test]
+#[ignore]
+fn show_gap_frame() {
+    let mut app = App::new(600);
+    history_with_gap(&mut app, 40, 300, 40);
+    for line in render_lines(&app, 92, 26) {
+        println!("|{line}|");
+    }
+}
