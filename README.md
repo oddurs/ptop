@@ -191,6 +191,45 @@ really are more than one tick apart and the seams are telling you so. Gaps aggre
 the same reason values aggregate by peak — zooming out must not be able to
 erase an event, least of all at the zoom where the whole buffer is on screen.
 
+## Configuration
+
+`~/.config/ptop/ptop.conf`, honouring `$XDG_CONFIG_HOME`. Every flag is a
+`key = value` line without the leading dashes:
+
+```ini
+# ~/.config/ptop/ptop.conf
+theme  = classic
+glyphs = block      # comments run to the end of the line
+color  = 256
+```
+
+Precedence, lowest first: built-in default, config file, `NO_COLOR`, flag. The
+flag always wins, so a wrapper script can override a user's file without
+editing it; `NO_COLOR` outranks the file because the file records a preference
+in general and the environment is saying something about this terminal now.
+
+**An unknown key warns and ptop starts anyway**, naming the key and the line —
+and guessing what you meant:
+
+```
+ptop: ~/.config/ptop/ptop.conf:6: unknown key `colour` (did you mean `color`?)
+```
+
+A bad line in the file warns; a bad flag is fatal. The asymmetry is deliberate:
+a config file is written once and read every run, so one typo must not cost you
+the tool, but a flag was typed for *this* run and quietly ignoring it would do
+something other than what was asked.
+
+Hand-rolled `key = value`, not TOML. ptop's config surface is genuinely flat,
+and `serde` + `toml` would be the largest dependency in the project by an order
+of magnitude — in a codebase whose `/proc` parser is deliberately hand-rolled
+with no dependencies at all. htop and btop both use `key = value` and neither
+has outgrown it.
+
+One table defines every setting once, and both the file and the command line
+drive it, so `theme = classic` and `--theme=classic` cannot come to disagree
+about what a value means.
+
 ## How it works
 
 Two backends behind one `Collector` trait:

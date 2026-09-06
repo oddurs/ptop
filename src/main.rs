@@ -9,6 +9,7 @@
 
 mod app;
 mod collect;
+mod config;
 #[cfg(test)]
 mod cvd;
 mod glyphs;
@@ -43,6 +44,20 @@ USAGE:
                     protanopia, against a target of 8, and red-green deficiency
                     affects roughly 8% of men. 'classic' restores green/yellow/red.
 
+CONFIG:
+    ~/.config/ptop/ptop.conf, honouring $XDG_CONFIG_HOME. Every setting above
+    is a `key = value` line without the leading dashes:
+
+        theme  = classic
+        glyphs = block      # comments run to the end of the line
+        color  = 256
+
+    Lowest precedence first: built-in default, config file, NO_COLOR, flag —
+    so a wrapper script can override a user's file without editing it.
+
+    An unknown key warns, naming the key and the line, and ptop starts anyway.
+    One typo should not cost you the tool.
+
 OPTIONS:
     -h, --help      show this help
     -V, --version   show version
@@ -65,15 +80,6 @@ const SAMPLE_INTERVAL: Duration = app::DEFAULT_INTERVAL;
 /// Samples retained, so ten minutes of scrollback at one per second.
 const HISTORY_LEN: usize = 600;
 
-/// Braille unless we are on a real Linux console, whose font has no braille
-/// glyphs. btop makes the same check (`btop.cpp:815`).
-fn default_glyphs() -> glyphs::GlyphSet {
-    match std::env::var("TERM").as_deref() {
-        Ok("linux") => glyphs::GlyphSet::Ascii,
-        _ => glyphs::GlyphSet::Braille,
-    }
-}
-
 /// Print a line, stopping the program quietly if the reader has gone away.
 ///
 /// Rust ignores SIGPIPE and turns the resulting write error into a panic, so
@@ -92,58 +98,51 @@ macro_rules! outln {
     }};
 }
 
+/// Print what could not be used.
+///
+/// Held rather than printed where it was found, because config is read before
+/// the alternate screen opens and the screen erases everything written before
+/// it. A warning nobody can see is not a warning, so the interactive path
+/// waits until the terminal is its own again.
+fn flush(warnings: &[config::Warning]) {
+    for w in warnings {
+        eprintln!("ptop: {w}");
+    }
+}
+
 fn main() -> io::Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mut collector = Platform::new()?;
 
-    let mut glyphs = default_glyphs();
-    let mut tier = theme::Tier::detect();
-    let mut palette = theme::Palette::default();
-    let mut positional = Vec::new();
-    for a in &args {
-        if let Some(name) = a.strip_prefix("--glyphs=") {
-            match glyphs::GlyphSet::parse(name) {
-                Some(set) => glyphs = set,
-                None => {
-                    eprintln!("ptop: unknown glyph set '{name}' (braille, block, ascii)");
-                    std::process::exit(2);
-                }
-            }
-        } else if let Some(name) = a.strip_prefix("--color=") {
-            match name {
-                // Re-detect rather than no-op, so a later --color=auto can
-                // override an earlier --color= baked into a wrapper script.
-                "auto" => tier = theme::Tier::detect(),
-                _ => match theme::Tier::parse(name) {
-                    Some(t) => tier = t,
-                    None => {
-                        eprintln!("ptop: unknown colour tier '{name}' (auto, mono, 16, 256, true)");
-                        std::process::exit(2);
-                    }
-                },
-            }
-        } else if let Some(name) = a.strip_prefix("--theme=") {
-            match name {
-                // Re-resolve rather than no-op, so a later --theme=auto can
-                // override an earlier --theme= baked into a wrapper script.
-                "auto" | "default" => palette = theme::Palette::default(),
-                _ => match theme::Palette::parse(name) {
-                    Some(pal) => palette = pal,
-                    None => {
-                        eprintln!("ptop: unknown theme '{name}' (safe, classic, auto)");
-                        std::process::exit(2);
-                    }
-                },
-            }
-        } else {
-            positional.push(a.clone());
-        }
-    }
+    let mut warnings = Vec::new();
+    let file = config::read(&mut warnings);
+    let no_color = std::env::var_os("NO_COLOR").is_some_and(|v| !v.is_empty());
+    let (settings, positional, file_warnings) = config::resolve(
+        config::Settings::detect(),
+        file.as_ref().map(|(o, t)| (o.as_str(), t.as_str())),
+        no_color,
+        &args,
+    )
+    .unwrap_or_else(|bad| {
+        // Before exiting, not after: a config file that could not be *read* is
+        // reported here too, and dropping that warning because a flag was also
+        // wrong would send the user off to fix the flag and rerun into the
+        // same silently-ignored config.
+        flush(&warnings);
+        eprintln!("ptop: {}", bad.as_flag());
+        std::process::exit(2);
+    });
+    warnings.extend(file_warnings);
+
     let args = positional;
 
     match args.first().map(String::as_str) {
-        Some("--once") => return once(&mut collector),
+        Some("--once") => {
+            flush(&warnings);
+            return once(&mut collector);
+        }
         Some("--bench") => {
+            flush(&warnings);
             // Measure with extended collection both off and on, so the cost
             // of gating a column is a number rather than a claim.
             let n = 20;
@@ -160,14 +159,17 @@ fn main() -> io::Result<()> {
             return Ok(());
         }
         Some("--help" | "-h") => {
+            flush(&warnings);
             outln!("{USAGE}");
             return Ok(());
         }
         Some("--version" | "-V") => {
+            flush(&warnings);
             outln!("ptop {}", env!("CARGO_PKG_VERSION"));
             return Ok(());
         }
         Some(other) => {
+            flush(&warnings);
             eprintln!("ptop: unrecognised option '{other}'\n\n{USAGE}");
             std::process::exit(2);
         }
@@ -175,8 +177,8 @@ fn main() -> io::Result<()> {
     }
 
     let mut app = App::new(HISTORY_LEN);
-    app.glyphs = glyphs;
-    app.theme = theme::Theme::new(palette, tier);
+    app.glyphs = settings.glyphs;
+    app.theme = theme::Theme::new(settings.palette, settings.tier);
 
     // Collect once before drawing so the first frame has real numbers. CPU
     // still reads zero — there is no previous counter to diff against yet.
@@ -185,6 +187,7 @@ fn main() -> io::Result<()> {
     let mut terminal = ratatui::init();
     let result = run(&mut terminal, &mut app, &mut collector);
     ratatui::restore();
+    flush(&warnings);
     result
 }
 
