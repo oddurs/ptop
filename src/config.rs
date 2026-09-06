@@ -116,7 +116,7 @@ pub enum Bad {
         expected: &'static str,
     },
     /// Two settings that are each fine and wrong together.
-    Pair(&'static str),
+    Pair(String),
 }
 
 impl std::fmt::Display for Bad {
@@ -253,7 +253,15 @@ pub fn resolve(
     // warning, the way every other bad line does, while a flag that does it is
     // fatal, the way every other bad flag is.
     if let Err(why) = check_thresholds(&settings) {
-        warnings.push(Warning(format!("{}: {why}", origin_of(&file))));
+        // Naming both defaults because the recovery reverts both, including
+        // one the file may never have set: a file saying only `critical = 40`
+        // is put back to 50/80, and the warning is the user's only sign of it.
+        warnings.push(Warning(format!(
+            "{}: {why} — using the defaults, {} and {}",
+            origin_of(&file),
+            Theme::DEFAULT_WARN_PCT,
+            Theme::DEFAULT_CRITICAL_PCT,
+        )));
         settings.warn = Theme::DEFAULT_WARN_PCT;
         settings.critical = Theme::DEFAULT_CRITICAL_PCT;
     }
@@ -278,13 +286,28 @@ pub fn resolve(
 /// The thresholds have to be usable as a pair, which neither key can tell
 /// alone.
 ///
-/// `warn == critical` is rejected along with `warn > critical`: an equal pair
-/// makes the warn band empty, so one of the two colours can never appear and
-/// the header legend would print a boundary that nothing is ever on the near
-/// side of.
-fn check_thresholds(s: &Settings) -> Result<(), &'static str> {
+/// Stated as one rule: every status band must be reachable. `heat` reads
+/// `[0, warn)` as ok, `[warn, critical)` as warn and `[critical, 100]` as
+/// critical, so `warn` above zero and `critical` above `warn` is exactly the
+/// condition for none of the three to be empty.
+///
+/// That covers `warn == critical`, which would leave the warn band empty, and
+/// `warn = 0`, which leaves nothing ever `ok` and draws a permanent rule along
+/// the bottom of both graphs. `critical = 100` is allowed: its band is the
+/// single point 100, but a machine really does reach 100% memory, so the band
+/// is reachable rather than empty.
+fn check_thresholds(s: &Settings) -> Result<(), String> {
+    if s.warn <= 0.0 {
+        return Err(format!(
+            "`warn` is {}, so nothing is ever ok; it must be above 0",
+            s.warn
+        ));
+    }
     if s.warn >= s.critical {
-        return Err("`warn` must be below `critical`");
+        return Err(format!(
+            "`warn` is {} and `critical` is {}; warn must be below critical",
+            s.warn, s.critical
+        ));
     }
     Ok(())
 }
@@ -688,20 +711,26 @@ mod thresholds {
             );
             assert_eq!(w.len(), 1, "`warn = {bad}` went unreported");
         }
-        // 0 and 100 are the ends of the range, not outside it.
-        assert_eq!(run(Some("warn = 0\n"), &[]).unwrap().0.warn, 0.0);
+        // 100 is the end of the range, not outside it.
         assert_eq!(
             run(Some("critical = 100\n"), &[]).unwrap().0.critical,
             100.0
         );
+        // …and a fraction is a percentage. The float type is the whole reason
+        // the header prints `{}` rather than `{:.0}`.
+        assert_eq!(run(Some("warn = 62.5\n"), &[]).unwrap().0.warn, 62.5);
     }
 
     #[test]
-    fn a_warn_at_or_above_critical_is_rejected_not_silently_accepted() {
-        // Equal is rejected along with greater: an equal pair leaves the warn
-        // band empty, so one of the two colours can never appear and the
-        // header prints a boundary nothing is ever on the near side of.
-        for (warn, critical) in [(90.0, 80.0), (80.0, 80.0)] {
+    fn a_pair_that_makes_a_status_unreachable_is_rejected() {
+        // One rule — every status band must be reachable — so all three ways
+        // of breaking it are checked against it. `heat` reads [0, warn) as ok,
+        // [warn, critical) as warn and [critical, 100] as critical.
+        for (warn, critical) in [
+            (90.0, 80.0), // inverted: the warn band runs backwards
+            (80.0, 80.0), // equal: the warn band is empty
+            (0.0, 80.0),  // nothing is ever ok
+        ] {
             let (s, w) = run(
                 Some(&format!("warn = {warn}\ncritical = {critical}\n")),
                 &[],
@@ -712,9 +741,17 @@ mod thresholds {
                 (Theme::DEFAULT_WARN_PCT, Theme::DEFAULT_CRITICAL_PCT),
                 "{warn}/{critical} was left in place"
             );
+            let said = |needle: &str| w.iter().any(|x| x.0.contains(needle));
             assert!(
-                w.iter().any(|x| x.0.contains("below")),
-                "{warn}/{critical} went unreported: {:?}",
+                said(&format!("{warn}")),
+                "{warn}/{critical}: the warning does not name the offending value: {:?}",
+                w.iter().map(|x| &x.0).collect::<Vec<_>>()
+            );
+            // The recovery reverts *both*, including one the file may never
+            // have set, so the warning has to say what it fell back to.
+            assert!(
+                said("default") && said("50") && said("80"),
+                "{warn}/{critical}: the warning does not say what it fell back to: {:?}",
                 w.iter().map(|x| &x.0).collect::<Vec<_>>()
             );
         }

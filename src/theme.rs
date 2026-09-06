@@ -414,7 +414,7 @@ impl Theme {
         }
     }
 
-    /// Status colour for a percentage, on the shared 50/80 thresholds.
+    /// Status colour for a percentage, on the theme's configured thresholds.
     pub fn heat(&self, pct: f32) -> Color {
         match pct {
             p if p >= self.critical_pct => self.critical,

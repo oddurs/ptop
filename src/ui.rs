@@ -235,10 +235,11 @@ fn heat_scale(width: u16, theme: &Theme) -> Option<String> {
     // Read from the theme, not from a constant, so the printed numbers cannot
     // drift from the ones the colouring actually uses. That agreement is the
     // whole value of printing them.
-    let scale = format!(
-        "· warn {:.0} · crit {:.0} ",
-        theme.warn_pct, theme.critical_pct
-    );
+    // `{}` rather than `{:.0}`: 50.0 still prints `50`, but 62.5 prints `62.5`
+    // instead of rounding to `62` and claiming the colour changes half a point
+    // from where it does. Rounding also made `warn = 49.6` print `50`,
+    // indistinguishable from the default the user was trying to move off.
+    let scale = format!("· warn {} · crit {} ", theme.warn_pct, theme.critical_pct);
     // Room for the state badge. There are no border columns to reserve since
     // L1 — the title is a full-width content line now.
     const RESERVED: usize = 24;

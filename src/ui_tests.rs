@@ -1588,7 +1588,14 @@ fn the_stated_scale_matches_the_colouring_it_describes() {
     for (warn, critical) in [
         (Theme::DEFAULT_WARN_PCT, Theme::DEFAULT_CRITICAL_PCT),
         (30.0, 65.0),
-        (0.0, 100.0),
+        (0.1, 100.0),
+        // The case that used to slip through: with three integer thresholds
+        // the legend could round and the test would never notice. `warn 62.5`
+        // printed as `warn 62` claimed the colour changes half a point from
+        // where it does, and `warn = 49.6` printed as `50` — indistinguishable
+        // from the default the user was trying to move off.
+        (62.5, 87.5),
+        (49.6, 80.0),
     ] {
         let th = Theme::new(Palette::Safe, Tier::TrueColor).with_thresholds(warn, critical);
         assert_ne!(
@@ -1610,11 +1617,11 @@ fn the_stated_scale_matches_the_colouring_it_describes() {
         let buf = term.backend().buffer();
         let row: String = (0..100u16).map(|x| buf[(x, 0)].symbol()).collect();
         assert!(
-            row.contains(&format!("warn {warn:.0}")),
+            row.contains(&format!("warn {warn}")),
             "the header does not print warn {warn}: {row:?}"
         );
         assert!(
-            row.contains(&format!("crit {critical:.0}")),
+            row.contains(&format!("crit {critical}")),
             "the header does not print critical {critical}: {row:?}"
         );
     }
