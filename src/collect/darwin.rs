@@ -77,6 +77,7 @@ impl Collector for SysinfoCollector {
                     // backend anyway.
                     threads: 1,
                     state: status_char(p.status()),
+                    started,
                     // sysinfo already reports these as bytes since the last
                     // refresh, so unlike the /proc backend there is no counter to
                     // diff here.

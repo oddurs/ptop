@@ -2,7 +2,7 @@
 id: 10
 title: Per-process sparkline from history
 type: feature
-status: backlog
+status: done
 milestone: v0.1
 created: 2026-09-05
 updated: 2026-09-05
