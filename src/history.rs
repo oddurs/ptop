@@ -229,7 +229,13 @@ pub fn gaps_in(times: &[std::time::SystemTime], nominal: std::time::Duration) ->
     if nominal.is_zero() {
         return vec![false; times.len()];
     }
-    let limit = nominal.saturating_mul(2);
+    // Floored, because "one missed tick" stops being a meaningful statement as
+    // the interval shrinks. At `interval = 50ms` a frame that took 100ms to
+    // draw and collect would otherwise read as time missing, and a monitor
+    // that is merely busy would paint itself full of seams. Below a quarter of
+    // a second there is no gap worth telling anyone about.
+    const FLOOR: std::time::Duration = std::time::Duration::from_millis(250);
+    let limit = nominal.saturating_mul(2).max(FLOOR);
     times
         .iter()
         .enumerate()

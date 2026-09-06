@@ -52,15 +52,16 @@ impl Settings {
 
     /// Samples the ring buffer needs to cover [`Settings::window`].
     ///
-    /// Rounded up, so the buffer always holds at least the window asked for
-    /// rather than a little less.
+    /// `n` samples span `n - 1` intervals, not `n` — the first one starts the
+    /// clock. Rounding up and adding that sample is what makes the buffer hold
+    /// at least the window asked for rather than one interval less.
     pub fn history_len(&self) -> usize {
         let per = self.interval.as_secs_f64();
         let span = self.window.as_secs_f64();
         if per <= 0.0 {
             return 1;
         }
-        (span / per).ceil().max(1.0) as usize
+        (span / per).ceil().max(1.0) as usize + 1
     }
 }
 
@@ -105,9 +106,13 @@ const MIN_WINDOW: Duration = Duration::from_secs(10);
 /// day of history at one a second and ten minutes at sixty a second cost the
 /// same. Every sample retains its whole process table — that is what makes
 /// scrubbing show the real table from that instant — so the buffer is roughly
-/// `samples * processes * 100 bytes`, or about 3.5 GB at this cap on a
+/// `samples * processes * 96 bytes`, or about 3.3 GB at this cap on a
 /// 400-process box. See the README.
-const MAX_SAMPLES: usize = 86_400;
+///
+/// Stated as the intent — a day of history at one sample a second — rather
+/// than as a round number, plus the one extra sample a span of that length
+/// needs. See [`Settings::history_len`].
+const MAX_SAMPLES: usize = 24 * 60 * 60 + 1;
 
 /// Braille unless we are on a real Linux console, whose font has no braille
 /// glyphs. btop makes the same check (`btop.cpp:815`).
@@ -192,8 +197,16 @@ fn duration(v: &str) -> Result<Duration, &'static str> {
         _ if v.ends_with('h') => (&v[..v.len() - 1], 3600.0),
         _ => (v, 1.0),
     };
+    // Bounded before converting, not after: `Duration::from_secs_f64` panics
+    // outside its range, so `window = 99999999999999999999` would have aborted
+    // the process — from a *config file*, which is the one place this module
+    // promises a typo cannot cost you the tool. A year is far past anything
+    // either setting will accept; `check_buffer` applies the real limits.
+    const MAX_SECS: f64 = 366.0 * 24.0 * 3600.0;
     match digits.trim().parse::<f64>() {
-        Ok(n) if n.is_finite() && n > 0.0 => Ok(Duration::from_secs_f64(n * scale)),
+        Ok(n) if n.is_finite() && n > 0.0 && n * scale <= MAX_SECS => {
+            Ok(Duration::from_secs_f64(n * scale))
+        }
         _ => Err(EXPECTED),
     }
 }
@@ -938,7 +951,22 @@ mod rate {
                 "`{text}` did not parse as {secs}s"
             );
         }
-        for text in ["", "soon", "0s", "-1s", "1x", "s"] {
+        for text in [
+            "",
+            "soon",
+            "0s",
+            "-1s",
+            "1x",
+            "s",
+            "inf",
+            "NaN",
+            // Past what a Duration can hold. `from_secs_f64` *panics* there,
+            // so this used to abort the process — from a config file, which
+            // is the one place a typo is promised not to cost you the tool.
+            "99999999999999999999",
+            "1e300",
+            "9999999h",
+        ] {
             assert!(duration(text).is_err(), "`{text}` was accepted");
         }
     }
@@ -953,14 +981,27 @@ mod rate {
             "{:?}",
             w.iter().map(|x| &x.0).collect::<Vec<_>>()
         );
-        assert_eq!(s.history_len(), 600);
+        assert_eq!(s.history_len(), 601);
 
         let (s, _) = run("window = 10m\ninterval = 500ms\n", &[]).unwrap();
-        assert_eq!(s.history_len(), 1200);
+        assert_eq!(s.history_len(), 1201);
 
-        // Rounded up, so the buffer always holds at least the window asked for.
-        let (s, _) = run("window = 10s\ninterval = 3s\n", &[]).unwrap();
-        assert_eq!(s.history_len(), 4);
+        // The buffer must hold *at least* the window. n samples span n - 1
+        // intervals, so an off-by-one here silently shortens everyone's
+        // history by one tick: 4 samples at 3s cover 9s, not the 10s asked for.
+        for (window, interval, want) in [(10.0, 3.0, 5usize), (600.0, 1.0, 601), (10.0, 1.0, 11)] {
+            let (s, _) = run(
+                &format!("window = {window}s\ninterval = {interval}s\n"),
+                &[],
+            )
+            .unwrap();
+            assert_eq!(s.history_len(), want, "{window}s at {interval}s");
+            let covered = (want - 1) as f64 * interval;
+            assert!(
+                covered >= window,
+                "{want} samples at {interval}s cover {covered}s, short of the {window}s asked for"
+            );
+        }
     }
 
     #[test]
@@ -980,6 +1021,8 @@ mod rate {
     fn the_limit_belongs_to_the_pair_not_to_either_setting() {
         // A day at one a second and ten minutes at sixty a second are the same
         // buffer, so neither number alone can be judged.
+        // A day at one a second is exactly the cap, and must be accepted:
+        // a limit that rejects the case it was sized for is off by one.
         assert!(
             run("window = 24h\ninterval = 1s\n", &[])
                 .unwrap()
@@ -987,7 +1030,7 @@ mod rate {
                 .is_empty()
         );
         let (_, w) = run("window = 24h\ninterval = 500ms\n", &[]).unwrap();
-        assert_eq!(w.len(), 1, "172800 samples was accepted");
+        assert_eq!(w.len(), 1, "twice the cap was accepted");
         // And the complaint says what it would cost, since "too many samples"
         // is not a quantity anyone can feel.
         assert!(w[0].0.contains("MB"), "{}", w[0].0);

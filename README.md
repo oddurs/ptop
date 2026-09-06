@@ -277,6 +277,9 @@ that instant rather than an interpolation — so the buffer is about
 | 400 | 23 MB | 139 MB | 231 MB |
 | 4000 | 231 MB | 1.4 GB | 2.3 GB |
 
+(a buffer holds one more sample than the span needs — `n` samples span `n − 1`
+intervals — so the real figures are a few kilobytes above these)
+
 (measured by the `show_sample_footprint` test, so the table can't drift from
 the structs)
 
@@ -285,8 +288,8 @@ the same buffer, so ptop bounds the **product** — the sample count — rather
 than either setting, and says what the buffer would cost when it refuses:
 
 ```
-ptop: `window` 86400s at `interval` 500ms is 172800 samples, above the limit
-      of 86400; every sample retains a whole process table, which is about
+ptop: `window` 86400s at `interval` 500ms is 172801 samples, above the limit
+      of 86401; every sample retains a whole process table, which is about
       6663 MB on a 400-process box
 ```
 

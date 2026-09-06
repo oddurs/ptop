@@ -127,12 +127,25 @@ fn fmt_bytes(b: u64) -> String {
 }
 
 /// Compact lag for the paused badge: seconds under a minute, then m/s.
+/// Exposed for tests: the format is a claim about legibility at both ends of
+/// the configurable range, which is only checkable by reading the string.
+#[cfg(test)]
+pub fn fmt_lag_for_test(d: Duration) -> String {
+    fmt_lag(d)
+}
+
 fn fmt_lag(d: Duration) -> String {
+    // Both ends matter now that the interval is configurable. Whole seconds
+    // rendered a 100ms slot as `0s/slot` — the exact mode sub-second sampling
+    // exists for — and a day-long window as `1440m00s buffered`, which is a
+    // number nobody can read as a day.
+    let ms = d.as_millis();
     let s = d.as_secs();
-    if s < 60 {
-        format!("{s}s")
-    } else {
-        format!("{}m{:02}s", s / 60, s % 60)
+    match s {
+        0 if ms > 0 => format!("{ms}ms"),
+        0..60 => format!("{s}s"),
+        60..3600 => format!("{}m{:02}s", s / 60, s % 60),
+        _ => format!("{}h{:02}m", s / 3600, (s % 3600) / 60),
     }
 }
 
@@ -506,7 +519,10 @@ fn draw_timeline(f: &mut Frame, area: Rect, app: &App) {
     let title = format!(
         " timeline — {} of {} buffered ",
         fmt_lag(app.history.span()),
-        fmt_lag(app.interval * app.history.capacity() as u32),
+        // `capacity - 1`, for the same reason `history_len` adds one: a buffer
+        // of n samples spans n - 1 intervals. `capacity * interval` overstated
+        // the span it can hold by exactly one interval.
+        fmt_lag(app.interval * app.history.capacity().saturating_sub(1) as u32),
     );
 
     let mut all = vec![divider(&title, area.width, &app.theme)];
