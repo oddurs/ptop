@@ -169,6 +169,28 @@ the tool exists to catch. Zoom is clamped to what the buffer can fill, so
 zooming out never shrinks the graph into a corner; the empty region on the left
 at full zoom is real time from before the buffer starts.
 
+A laptop that sleeps, or a box loaded enough to miss its tick, leaves samples
+minutes apart. Drawn as adjacent cells those claim to be one second apart, and
+the x-axis quietly stops meaning anything. ptop draws a `┊` seam wherever at least
+one interval went unobserved, full height and in chrome so it cannot be read as
+a bar:
+
+```text
+CPU ⠀⠀⠀⠀⠀⠀⠀⣤⣤⣤⣤⣤⣤⣤⣤⣤⣤⣤⣤⣤┊⣤⣤⣤⣤⣤⣤⣤⣤⣤⣤⣤
+  0 ⠀⠀⠀⠀⠀⠀⠀⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿┊⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿
+1m20s shown, 1s/slot, ┊ time missing — ←/→ scrub, +/- zoom
+```
+
+A gap is *a missing sample*, not a slow one, so the line falls at twice the
+nominal interval and needs no tuning. Sampling runs on a fixed cadence rather
+than one interval after the previous sample finished — otherwise collection and
+draw time are added to every period, the timestamps drift away from the rate
+they claim, and on a busy box the detector would eventually see a missed tick
+on every cell. If the host genuinely cannot sustain the interval, the samples
+really are more than one tick apart and the seams are telling you so. Gaps aggregate by **or** for
+the same reason values aggregate by peak — zooming out must not be able to
+erase an event, least of all at the zoom where the whole buffer is on screen.
+
 ## How it works
 
 Two backends behind one `Collector` trait:

@@ -379,6 +379,13 @@ fn draw_timeline(f: &mut Frame, area: Rect, app: &App) {
     let cpu_slots = history::peak_slots(&cpu, zoom, slots);
     let mem_slots = history::peak_slots(&mem, zoom, slots);
 
+    // Gaps are found over the whole buffer, not the window, so a discontinuity
+    // falling on the first drawn sample is still seen — within the window it
+    // has no predecessor to be discontinuous with.
+    let all_times: Vec<std::time::SystemTime> = samples.iter().map(|s| s.at).collect();
+    let all_gaps = history::gaps_in(&all_times, app.interval);
+    let gap_slots = history::any_slots(&all_gaps[window_start..window_start + shown], zoom, slots);
+
     // The threshold rule. Its whole point is that the boundary is readable
     // without colour — until now the 50/80 thresholds existed *only* as a hue
     // change, which is invisible to the most common colour vision deficiency
@@ -426,6 +433,7 @@ fn draw_timeline(f: &mut Frame, area: Rect, app: &App) {
                         rule_level,
                         series,
                         ceiling,
+                        gaps: &gap_slots,
                     },
                     &app.theme,
                 )
@@ -449,21 +457,53 @@ fn draw_timeline(f: &mut Frame, area: Rect, app: &App) {
     ));
 
     if lines.len() < inner_h {
-        let span = fmt_lag(Duration::from_secs(window.len() as u64));
+        // Real elapsed time, not sample count. A caption saying `4m32s shown`
+        // beside a seam saying `time missing` is the graph contradicting
+        // itself in adjacent characters — the window really did span nine
+        // minutes, and 272 of those seconds are the gap.
+        let span = fmt_lag(
+            window
+                .first()
+                .zip(window.last())
+                .and_then(|(a, b)| b.at.duration_since(a.at).ok())
+                .unwrap_or_default(),
+        );
+        let per_slot = fmt_lag(app.interval * zoom as u32);
         // Only the identification half is dropped when the gutter names the
         // series. The span, the slot size and the keys are not a legend and
         // are not duplicated anywhere else.
         let ident = if labelled { "" } else { "cpu · mem — " };
-        lines.push(Line::from(Span::styled(
-            format!("{ident}{span} shown, {zoom}s/slot — ←/→ scrub, +/- zoom"),
-            app.theme.dim_style(),
-        )));
+        // Named only when one is on screen. A seam is self-evidently not data,
+        // but "time is missing here" is not something a reader can deduce from
+        // a dotted line, and a permanent legend entry for something you may
+        // never see is clutter charged against every other frame.
+        let gap_note = if gap_slots.iter().any(|&g| g) {
+            format!(", {} time missing", app.glyphs.gap_glyph())
+        } else {
+            String::new()
+        };
+        // Drop the key hints before letting anything be cut mid-word. The
+        // scale is a fact about what is on screen and the gap note is a
+        // correction to it; the keys are a reminder, and a reminder is the
+        // right thing to lose first. Without this the gap note cost about
+        // sixteen columns and silently truncated `+/- zoom` on a narrow panel.
+        let facts = format!("{ident}{span} shown, {per_slot}/slot{gap_note}");
+        let keys = " — ←/→ scrub, +/- zoom";
+        let legend = if facts.chars().count() + keys.chars().count() <= inner_w {
+            facts + keys
+        } else {
+            facts
+        };
+        lines.push(Line::from(Span::styled(legend, app.theme.dim_style())));
     }
 
+    // Retained is what the clock says; capacity is what the buffer will hold at
+    // the nominal rate, which is a claim about the future and so is nominal by
+    // nature. Mixing a measured figure with a projected one is deliberate.
     let title = format!(
         " timeline — {} of {} buffered ",
-        fmt_lag(Duration::from_secs(app.history.len() as u64)),
-        fmt_lag(Duration::from_secs(app.history.capacity() as u64)),
+        fmt_lag(app.history.span()),
+        fmt_lag(app.interval * app.history.capacity() as u32),
     );
 
     let mut all = vec![divider(&title, area.width, &app.theme)];
@@ -489,11 +529,13 @@ struct GraphRow<'a> {
     series: Color,
     /// Top of the y-axis for this graph.
     ceiling: f32,
+    /// Per-slot flags marking where time is missing from the buffer.
+    gaps: &'a [bool],
 }
 
 /// Draw one row of a graph.
 fn glyph_row(g: GraphRow, theme: &Theme) -> Line<'static> {
-    let (set, values, row, rows, spc, rule_level, series, ceiling) = (
+    let (set, values, row, rows, spc, rule_level, series, ceiling, gaps) = (
         g.set,
         g.values,
         g.row,
@@ -502,11 +544,33 @@ fn glyph_row(g: GraphRow, theme: &Theme) -> Line<'static> {
         g.rule_level,
         g.series,
         g.ceiling,
+        g.gaps,
     );
     let spans = values
         .chunks(spc)
         .enumerate()
         .map(|(i, cell)| {
+            // A seam where time is missing, drawn full height and in chrome so
+            // it cannot be read as a bar.
+            //
+            // It costs the whole cell — `spc * zoom` samples, so two at the
+            // default and sixteen at maximum zoom on a braille terminal. That
+            // is a real loss and worth naming: a machine that has just woken
+            // or just unwedged is exactly when a spike is likely, and a spike
+            // in the sample beside the resumed one is hidden by this.
+            //
+            // Taken anyway, because the alternative is worse in kind rather
+            // than in degree. Compressing twenty minutes of absence into one
+            // cell of idle is not a lost sample, it is a graph whose x-axis is
+            // untrue, and every reading taken from it after that is wrong. The
+            // cost also scales the right way: the more samples a cell covers,
+            // the more time the seam is standing for.
+            if gaps
+                .get(i * spc..(i * spc + spc).min(gaps.len()))
+                .is_some_and(|g| g.iter().any(|&f| f))
+            {
+                return Span::styled(set.gap_glyph().to_string(), theme.chrome_style());
+            }
             let pcts: Vec<f32> = cell.iter().map(|v| v.unwrap_or(0.0)).collect();
             let left = glyphs::level_in_row_scaled(pcts[0], row, rows, ceiling);
             let right =

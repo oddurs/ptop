@@ -77,6 +77,19 @@ impl History {
         newest.at.duration_since(cur.at).unwrap_or_default()
     }
 
+    /// Wall-clock time covered by the retained samples.
+    ///
+    /// Read from the timestamps, not from `len() * interval`. Those agree only
+    /// on a machine that never slept and never fell behind — the two cases the
+    /// timeline now draws a seam for. A buffer whose graph announces that time
+    /// is missing must not caption itself with a duration that excludes it.
+    pub fn span(&self) -> std::time::Duration {
+        let (Some(first), Some(last)) = (self.samples.front(), self.samples.back()) else {
+            return std::time::Duration::ZERO;
+        };
+        last.at.duration_since(first.at).unwrap_or_default()
+    }
+
     pub fn iter(&self) -> impl Iterator<Item = &Sample> {
         self.samples.iter()
     }
@@ -187,6 +200,70 @@ pub fn peak_slots(values: &[f32], zoom: usize, slots: usize) -> Vec<Option<f32>>
             .iter()
             .copied()
             .fold(None::<f32>, |acc, v| Some(acc.map_or(v, |a: f32| a.max(v))));
+    }
+    out
+}
+
+/// Which samples are not contiguous in time with the one before them.
+///
+/// A laptop that sleeps, or a box loaded enough to miss its tick, produces
+/// samples minutes apart. Rendered as adjacent cells they claim to be one
+/// interval apart, and the x-axis quietly stops meaning anything — the graph
+/// compresses twenty minutes of absence into the same width as one second of
+/// idle. htop carries a comment about this exact hazard ("period might be 0
+/// after system sleep"), which is somebody else's scar tissue, available free.
+///
+/// A gap is defined as **a missing sample**, not a slow one: at least twice the
+/// nominal interval means at least one tick went unobserved. Collection jitter
+/// under load stretches an interval by a fraction, never doubles it, so the
+/// line separates the two without a tuning knob.
+///
+/// The flag marks the sample *after* the discontinuity — the one whose arrival
+/// is unaccounted for. Index 0 is never a gap: it has no predecessor here, and
+/// inventing one would put a seam at the left edge of every fresh buffer.
+pub fn gaps_in(times: &[std::time::SystemTime], nominal: std::time::Duration) -> Vec<bool> {
+    // A zero nominal interval has no notion of a missed tick, and `>= 0` would
+    // otherwise flag every sample and render the whole graph as seams. Item
+    // 0013 makes this number configurable, so the degenerate value stops being
+    // hypothetical the moment someone writes `interval = 0`.
+    if nominal.is_zero() {
+        return vec![false; times.len()];
+    }
+    let limit = nominal.saturating_mul(2);
+    times
+        .iter()
+        .enumerate()
+        .map(
+            |(i, at)| match i.checked_sub(1).and_then(|j| times.get(j)) {
+                // A clock that went backwards is not a gap. `duration_since` fails
+                // rather than reporting it, and treating that as a gap would paint
+                // seams across the whole graph on a machine that just stepped NTP.
+                Some(prev) => at.duration_since(*prev).is_ok_and(|d| d >= limit),
+                None => false,
+            },
+        )
+        .collect()
+}
+
+/// Pack per-sample flags into display slots, the same right-aligned way
+/// [`peak_slots`] packs values.
+///
+/// Aggregated by **or**, which is the boolean form of the same rule that makes
+/// values aggregate by peak: zooming out must not be able to erase an event.
+/// Any other rule would let a gap vanish at the zoom level where the whole
+/// buffer is on screen — precisely the view you would be in to notice one.
+pub fn any_slots(flags: &[bool], zoom: usize, slots: usize) -> Vec<bool> {
+    let zoom = zoom.max(1);
+    let n = flags.len();
+    let mut out = vec![false; slots];
+
+    for (k, slot) in out.iter_mut().rev().enumerate() {
+        let end = n.saturating_sub(k * zoom);
+        if end == 0 {
+            break;
+        }
+        let start = end.saturating_sub(zoom);
+        *slot = flags[start..end].iter().any(|&f| f);
     }
     out
 }
