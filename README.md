@@ -198,10 +198,24 @@ erase an event, least of all at the zoom where the whole buffer is on screen.
 
 ```ini
 # ~/.config/ptop/ptop.conf
-theme  = classic
-glyphs = block      # comments run to the end of the line
-color  = 256
+theme    = classic
+glyphs   = block    # comments run to the end of the line
+color    = 256
+warn     = 65       # a build box is busy at 50% and perfectly fine
+critical = 90
 ```
+
+`warn` and `critical` are where the status colours change, where the timeline
+draws its threshold rules, and what the header legend prints. All three read
+the same pair, so the printed numbers cannot drift from the behaviour they
+describe — that agreement is the entire value of printing them.
+
+`warn` must be below `critical`, and an equal pair is rejected along with an
+inverted one: equal leaves the warn band empty, so one of the two colours could
+never appear and the header would print a boundary nothing is ever on the near
+side of. Out-of-range values are rejected rather than clamped — `warn = 150` is
+someone who has misunderstood the units, and quietly turning it into 100 hides
+that from them for as long as they use the tool.
 
 Precedence, lowest first: built-in default, config file, `NO_COLOR`, flag. The
 flag always wins, so a wrapper script can override a user's file without

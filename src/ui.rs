@@ -205,7 +205,7 @@ fn draw_header(f: &mut Frame, area: Rect, app: &App, s: &Sample) {
     // The heat scale lives on the title line: it is a reference for the
     // figures just below it, and the header is always drawn.
     let mut title = vec![state];
-    if let Some(scale) = heat_scale(area.width) {
+    if let Some(scale) = heat_scale(area.width, &app.theme) {
         title.push(Span::styled(scale, app.theme.dim_style()));
     }
     let title = Line::from(title);
@@ -231,11 +231,13 @@ fn draw_header(f: &mut Frame, area: Rect, app: &App, s: &Sample) {
 /// Measured in columns, not bytes: `·` is two bytes and one column, so byte
 /// length silently over-reserves, and would be three times wrong if the text
 /// ever gained a wide character.
-fn heat_scale(width: u16) -> Option<String> {
+fn heat_scale(width: u16, theme: &Theme) -> Option<String> {
+    // Read from the theme, not from a constant, so the printed numbers cannot
+    // drift from the ones the colouring actually uses. That agreement is the
+    // whole value of printing them.
     let scale = format!(
         "· warn {:.0} · crit {:.0} ",
-        Theme::WARN_PCT,
-        Theme::CRITICAL_PCT
+        theme.warn_pct, theme.critical_pct
     );
     // Room for the state badge. There are no border columns to reserve since
     // L1 — the title is a full-width content line now.
@@ -408,7 +410,7 @@ fn draw_timeline(f: &mut Frame, area: Rect, app: &App) {
         // Both thresholds, not just critical. The warn boundary is the one the
         // roadmap actually asked for, and leaving it hue-only kept it invisible
         // to the commonest colour vision deficiency and on any mono terminal.
-        let rules: Vec<(usize, usize)> = [Theme::WARN_PCT, Theme::CRITICAL_PCT]
+        let rules: Vec<(usize, usize)> = [app.theme.warn_pct, app.theme.critical_pct]
             .iter()
             .filter_map(|&pct| glyphs::rule_position_scaled(pct, rows, ceiling))
             .collect();

@@ -39,6 +39,8 @@ USAGE:
     --glyphs=SET    timeline drawing: braille (default), block, or ascii.
                     Falls back to ascii automatically on a Linux console.
     --color=TIER    auto (default), mono, 16, 256, or true. Honours NO_COLOR.
+    --warn=PCT      where 'getting busy' begins (default 50)
+    --critical=PCT  where 'in trouble' begins (default 80). Must exceed --warn.
     --theme=NAME    safe (default), classic, or auto. 'safe' replaces green with
                     cyan: green/yellow separates by only dE 3.7 under simulated
                     protanopia, against a target of 8, and red-green deficiency
@@ -48,9 +50,11 @@ CONFIG:
     ~/.config/ptop/ptop.conf, honouring $XDG_CONFIG_HOME. Every setting above
     is a `key = value` line without the leading dashes:
 
-        theme  = classic
-        glyphs = block      # comments run to the end of the line
-        color  = 256
+        theme    = classic
+        glyphs   = block    # comments run to the end of the line
+        color    = 256
+        warn     = 65       # a build box is busy at 50% and fine
+        critical = 90
 
     Lowest precedence first: built-in default, config file, NO_COLOR, flag —
     so a wrapper script can override a user's file without editing it.
@@ -178,7 +182,8 @@ fn main() -> io::Result<()> {
 
     let mut app = App::new(HISTORY_LEN);
     app.glyphs = settings.glyphs;
-    app.theme = theme::Theme::new(settings.palette, settings.tier);
+    app.theme = theme::Theme::new(settings.palette, settings.tier)
+        .with_thresholds(settings.warn, settings.critical);
 
     // Collect once before drawing so the first frame has real numbers. CPU
     // still reads zero — there is no previous counter to diff against yet.

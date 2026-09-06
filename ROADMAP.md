@@ -40,7 +40,7 @@ Collector fast enough for sub-second sampling, and the data-fidelity gaps agains
 
 ## v1.0 — Yours to configure
 
-`###·······` 25% · 1 of 4 done · due 2027-01-01
+`#####·····` 50% · 2 of 4 done · due 2027-01-01
 
 Config file, user themes, documented and safe to depend on.
 
@@ -48,11 +48,11 @@ Config file, user themes, documented and safe to depend on.
 
 - [ ] `0002` User theme files with partial overrides <sup>feature · p2</sup>
 - [ ] `0003` Validate user themes and say why one fails <sup>feature · p1</sup>
-- [ ] `0004` Configurable warn and critical thresholds <sup>feature · p3</sup>
 
 ### done
 
 - [x] `0001` Config file at ~/.config/ptop/ptop.conf <sup>feature · p2</sup>
+- [x] `0004` Configurable warn and critical thresholds <sup>feature · p3</sup>
 
 ## later — Someday
 
