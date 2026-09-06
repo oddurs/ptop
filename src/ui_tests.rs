@@ -2617,3 +2617,25 @@ fn the_legend_degrades_rather_than_truncating_a_word() {
         );
     }
 }
+
+#[test]
+#[ignore]
+fn show_sample_footprint() {
+    use crate::sample::{ProcSample, Sample};
+    println!("ProcSample: {} bytes", std::mem::size_of::<ProcSample>());
+    println!("Sample:     {} bytes", std::mem::size_of::<Sample>());
+    for procs in [100usize, 400, 4000] {
+        let per = std::mem::size_of::<Sample>() + procs * std::mem::size_of::<ProcSample>();
+        for (label, samples) in [
+            ("10m at 1s", 600usize),
+            ("1h at 1s", 3600),
+            ("10m at 100ms", 6000),
+            ("cap", 86_400),
+        ] {
+            println!(
+                "{procs:5} procs, {label:14} = {samples:6} samples -> {:6.1} MB",
+                (per * samples) as f64 / 1e6
+            );
+        }
+    }
+}

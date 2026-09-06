@@ -13,9 +13,11 @@
 //! one gets the other for free.
 
 use crate::glyphs::GlyphSet;
+use crate::sample::{ProcSample, Sample};
 use crate::theme::{Palette, Theme, Tier};
 use std::ffi::OsString;
 use std::path::PathBuf;
+use std::time::Duration;
 
 /// Everything settable, resolved.
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -26,6 +28,11 @@ pub struct Settings {
     /// Where "getting busy" and "in trouble" begin, as percentages.
     pub warn: f32,
     pub critical: f32,
+    /// Time between samples.
+    pub interval: Duration,
+    /// How much history to retain, in time rather than samples. Sample count
+    /// is a fact about the buffer; the span is what the user actually wants.
+    pub window: Duration,
 }
 
 impl Settings {
@@ -38,9 +45,69 @@ impl Settings {
             palette: Palette::default(),
             warn: Theme::DEFAULT_WARN_PCT,
             critical: Theme::DEFAULT_CRITICAL_PCT,
+            interval: crate::app::DEFAULT_INTERVAL,
+            window: DEFAULT_WINDOW,
+        }
+    }
+
+    /// Samples the ring buffer needs to cover [`Settings::window`].
+    ///
+    /// Rounded up, so the buffer always holds at least the window asked for
+    /// rather than a little less.
+    pub fn history_len(&self) -> usize {
+        let per = self.interval.as_secs_f64();
+        let span = self.window.as_secs_f64();
+        if per <= 0.0 {
+            return 1;
+        }
+        (span / per).ceil().max(1.0) as usize
+    }
+}
+
+#[cfg(test)]
+impl Settings {
+    /// Settings that do not depend on the environment, for tests.
+    ///
+    /// One fixture rather than a literal per test module: three copies of a
+    /// struct literal all have to be updated together every time a setting is
+    /// added, and the compiler only tells you about it after you have written
+    /// the test.
+    fn fixed() -> Self {
+        Self {
+            glyphs: GlyphSet::Braille,
+            tier: Tier::TrueColor,
+            palette: Palette::Safe,
+            warn: Theme::DEFAULT_WARN_PCT,
+            critical: Theme::DEFAULT_CRITICAL_PCT,
+            interval: crate::app::DEFAULT_INTERVAL,
+            window: DEFAULT_WINDOW,
         }
     }
 }
+
+/// Ten minutes, the span the buffer has always held at one sample a second.
+pub const DEFAULT_WINDOW: Duration = Duration::from_secs(600);
+
+/// Bounds on the sample rate.
+///
+/// Below the floor the collector is most of what the machine is doing: a pass
+/// costs about 1ms at 400 processes, so 50ms spends 2% of a core and 10ms
+/// would spend 10% — a monitor that is itself the load is not measuring the
+/// machine, it is measuring itself. Above the ceiling the timeline stops being
+/// a timeline.
+const MIN_INTERVAL: Duration = Duration::from_millis(50);
+const MAX_INTERVAL: Duration = Duration::from_secs(60);
+const MIN_WINDOW: Duration = Duration::from_secs(10);
+
+/// The most samples the ring buffer will be asked to hold.
+///
+/// The limit belongs to the *product* of the two settings, not to either: a
+/// day of history at one a second and ten minutes at sixty a second cost the
+/// same. Every sample retains its whole process table — that is what makes
+/// scrubbing show the real table from that instant — so the buffer is roughly
+/// `samples * processes * 100 bytes`, or about 3.5 GB at this cap on a
+/// 400-process box. See the README.
+const MAX_SAMPLES: usize = 86_400;
 
 /// Braille unless we are on a real Linux console, whose font has no braille
 /// glyphs. btop makes the same check (`btop.cpp:815`).
@@ -82,6 +149,14 @@ pub const KEYS: &[(&str, Apply)] = &[
         s.critical = percentage(v)?;
         Ok(())
     }),
+    ("interval", |s, v| {
+        s.interval = duration(v)?;
+        Ok(())
+    }),
+    ("window", |s, v| {
+        s.window = duration(v)?;
+        Ok(())
+    }),
     ("theme", |s, v| {
         s.palette = match v {
             "auto" | "default" => Palette::default(),
@@ -100,6 +175,26 @@ fn percentage(v: &str) -> Result<f32, &'static str> {
     match v.parse::<f32>() {
         Ok(n) if (0.0..=100.0).contains(&n) => Ok(n),
         _ => Err("a percentage from 0 to 100"),
+    }
+}
+
+/// A span, written the way people write them: `500ms`, `2s`, `10m`, `1h`.
+///
+/// A bare number is seconds, because that is what someone typing `interval = 2`
+/// means, and guessing milliseconds there would silently sample five hundred
+/// times too fast.
+fn duration(v: &str) -> Result<Duration, &'static str> {
+    const EXPECTED: &str = "a span like `500ms`, `2s`, `10m` or `1h`";
+    let (digits, scale) = match v {
+        _ if v.ends_with("ms") => (&v[..v.len() - 2], 0.001),
+        _ if v.ends_with('s') => (&v[..v.len() - 1], 1.0),
+        _ if v.ends_with('m') => (&v[..v.len() - 1], 60.0),
+        _ if v.ends_with('h') => (&v[..v.len() - 1], 3600.0),
+        _ => (v, 1.0),
+    };
+    match digits.trim().parse::<f64>() {
+        Ok(n) if n.is_finite() && n > 0.0 => Ok(Duration::from_secs_f64(n * scale)),
+        _ => Err(EXPECTED),
     }
 }
 
@@ -252,18 +347,28 @@ pub fn resolve(
     // file that leaves the pair meaningless falls back to the defaults with a
     // warning, the way every other bad line does, while a flag that does it is
     // fatal, the way every other bad flag is.
-    if let Err(why) = check_thresholds(&settings) {
-        // Naming both defaults because the recovery reverts both, including
-        // one the file may never have set: a file saying only `critical = 40`
-        // is put back to 50/80, and the warning is the user's only sign of it.
+    if let Err(why) = check_settings(&settings) {
+        // Reverting every cross-key setting, not just the pair that failed:
+        // they are checked together, so a half-reverted state has not been
+        // checked at all. Named in the warning because the revert can undo a
+        // value the file never set — a file saying only `critical = 40` is put
+        // back to 50/80, and this is the user's only sign of it.
+        let d = Settings {
+            warn: Theme::DEFAULT_WARN_PCT,
+            critical: Theme::DEFAULT_CRITICAL_PCT,
+            interval: crate::app::DEFAULT_INTERVAL,
+            window: DEFAULT_WINDOW,
+            ..settings
+        };
         warnings.push(Warning(format!(
-            "{}: {why} — using the defaults, {} and {}",
+            "{}: {why} — using the defaults: warn {}, critical {}, interval {:?}, window {:?}",
             origin_of(&file),
-            Theme::DEFAULT_WARN_PCT,
-            Theme::DEFAULT_CRITICAL_PCT,
+            d.warn,
+            d.critical,
+            d.interval,
+            d.window,
         )));
-        settings.warn = Theme::DEFAULT_WARN_PCT;
-        settings.critical = Theme::DEFAULT_CRITICAL_PCT;
+        settings = d;
     }
 
     let mut positional = Vec::new();
@@ -278,7 +383,7 @@ pub fn resolve(
             _ => positional.push(a.clone()),
         }
     }
-    check_thresholds(&settings).map_err(Bad::Pair)?;
+    check_settings(&settings).map_err(Bad::Pair)?;
 
     Ok((settings, positional, warnings))
 }
@@ -296,6 +401,60 @@ pub fn resolve(
 /// the bottom of both graphs. `critical = 100` is allowed: its band is the
 /// single point 100, but a machine really does reach 100% memory, so the band
 /// is reachable rather than empty.
+fn check_settings(s: &Settings) -> Result<(), String> {
+    check_thresholds(s)?;
+    check_buffer(s)
+}
+
+/// Bounds on the sample rate and on what the two rate settings cost together.
+///
+/// The sample count is checked rather than the window, because the window on
+/// its own says nothing: a day of history at one sample a second and ten
+/// minutes at sixty a second are the same buffer.
+fn check_buffer(s: &Settings) -> Result<(), String> {
+    if s.interval < MIN_INTERVAL || s.interval > MAX_INTERVAL {
+        return Err(format!(
+            "`interval` is {:?}; it must be between {MIN_INTERVAL:?} and {MAX_INTERVAL:?}",
+            s.interval
+        ));
+    }
+    if s.window < MIN_WINDOW {
+        return Err(format!(
+            "`window` is {:?}; it must be at least {MIN_WINDOW:?}",
+            s.window
+        ));
+    }
+    if s.window < s.interval {
+        return Err(format!(
+            "`window` is {:?} but `interval` is {:?}; the window must hold at least one sample",
+            s.window, s.interval
+        ));
+    }
+    let samples = s.history_len();
+    if samples > MAX_SAMPLES {
+        return Err(format!(
+            "`window` {:?} at `interval` {:?} is {samples} samples, above the limit of {MAX_SAMPLES}; \
+             every sample retains a whole process table, which is about {} MB \
+             on a 400-process box",
+            s.window,
+            s.interval,
+            estimated_mb(samples, 400),
+        ));
+    }
+    Ok(())
+}
+
+/// Roughly what a buffer of this shape costs, in megabytes.
+///
+/// Rough on purpose: the figure exists to make "that is a lot of memory"
+/// concrete, and a reader who needs it to the byte is asking the wrong
+/// question of a monitor. The `show_sample_footprint` test prints the real
+/// sizes this is derived from.
+fn estimated_mb(samples: usize, procs: usize) -> usize {
+    let per = size_of::<Sample>() + procs * size_of::<ProcSample>();
+    per.saturating_mul(samples) / 1_000_000
+}
+
 fn check_thresholds(s: &Settings) -> Result<(), String> {
     if s.warn <= 0.0 {
         return Err(format!(
@@ -422,13 +581,7 @@ mod tests {
     /// Apply a config body to freshly detected settings, returning both the
     /// result and every complaint.
     fn apply(text: &str) -> (Settings, Vec<String>) {
-        let mut s = Settings {
-            glyphs: GlyphSet::Braille,
-            tier: Tier::TrueColor,
-            palette: Palette::Safe,
-            warn: Theme::DEFAULT_WARN_PCT,
-            critical: Theme::DEFAULT_CRITICAL_PCT,
-        };
+        let mut s = Settings::fixed();
         let mut w = Vec::new();
         apply_file(&mut s, text, "conf", &mut w);
         (s, w.into_iter().map(|x| x.0).collect())
@@ -446,8 +599,7 @@ mod tests {
                 glyphs: GlyphSet::Block,
                 tier: Tier::Mono,
                 palette: Palette::Classic,
-                warn: Theme::DEFAULT_WARN_PCT,
-                critical: Theme::DEFAULT_CRITICAL_PCT,
+                ..Settings::fixed()
             }
         );
     }
@@ -553,13 +705,7 @@ mod tests {
     }
 
     fn apply_one(key: &str, value: &str) -> Bad {
-        let mut s = Settings {
-            glyphs: GlyphSet::Braille,
-            tier: Tier::TrueColor,
-            palette: Palette::Safe,
-            warn: Theme::DEFAULT_WARN_PCT,
-            critical: Theme::DEFAULT_CRITICAL_PCT,
-        };
+        let mut s = Settings::fixed();
         super::apply(&mut s, key, value).expect_err("value should be rejected")
     }
 
@@ -600,13 +746,7 @@ mod precedence {
     use super::*;
 
     fn base() -> Settings {
-        Settings {
-            glyphs: GlyphSet::Braille,
-            tier: Tier::TrueColor,
-            palette: Palette::Safe,
-            warn: Theme::DEFAULT_WARN_PCT,
-            critical: Theme::DEFAULT_CRITICAL_PCT,
-        }
+        Settings::fixed()
     }
 
     fn run(file: Option<&str>, no_color: bool, args: &[&str]) -> (Settings, Vec<String>) {
@@ -672,13 +812,7 @@ mod thresholds {
     use super::*;
 
     fn base() -> Settings {
-        Settings {
-            glyphs: GlyphSet::Braille,
-            tier: Tier::TrueColor,
-            palette: Palette::Safe,
-            warn: Theme::DEFAULT_WARN_PCT,
-            critical: Theme::DEFAULT_CRITICAL_PCT,
-        }
+        Settings::fixed()
     }
 
     fn run(file: Option<&str>, args: &[&str]) -> Result<(Settings, Vec<Warning>), Bad> {
@@ -773,5 +907,99 @@ mod thresholds {
         let (s, w) = run(Some("warn = 90\n"), &["--critical=95"]).unwrap();
         assert_eq!((s.warn, s.critical), (Theme::DEFAULT_WARN_PCT, 95.0));
         assert_eq!(w.len(), 1);
+    }
+}
+
+#[cfg(test)]
+mod rate {
+    use super::*;
+
+    fn run(file: &str, args: &[&str]) -> Result<(Settings, Vec<Warning>), Bad> {
+        let args: Vec<String> = args.iter().map(|s| s.to_string()).collect();
+        resolve(Settings::fixed(), Some(("conf", file)), false, &args).map(|(s, _, w)| (s, w))
+    }
+
+    #[test]
+    fn a_span_is_written_the_way_people_write_spans() {
+        for (text, secs) in [
+            ("500ms", 0.5),
+            ("2s", 2.0),
+            ("10m", 600.0),
+            ("1h", 3600.0),
+            // A bare number is seconds: it is what someone typing
+            // `interval = 2` means, and guessing milliseconds there would
+            // silently sample five hundred times too fast.
+            ("2", 2.0),
+            ("1.5s", 1.5),
+        ] {
+            assert_eq!(
+                duration(text).map(|d| d.as_secs_f64()),
+                Ok(secs),
+                "`{text}` did not parse as {secs}s"
+            );
+        }
+        for text in ["", "soon", "0s", "-1s", "1x", "s"] {
+            assert!(duration(text).is_err(), "`{text}` was accepted");
+        }
+    }
+
+    #[test]
+    fn the_window_is_a_span_and_the_buffer_follows_it() {
+        // Sample count is a fact about the buffer; the span is what the user
+        // wants. Halving the interval over the same window doubles the buffer.
+        let (s, w) = run("window = 10m\ninterval = 1s\n", &[]).unwrap();
+        assert!(
+            w.is_empty(),
+            "{:?}",
+            w.iter().map(|x| &x.0).collect::<Vec<_>>()
+        );
+        assert_eq!(s.history_len(), 600);
+
+        let (s, _) = run("window = 10m\ninterval = 500ms\n", &[]).unwrap();
+        assert_eq!(s.history_len(), 1200);
+
+        // Rounded up, so the buffer always holds at least the window asked for.
+        let (s, _) = run("window = 10s\ninterval = 3s\n", &[]).unwrap();
+        assert_eq!(s.history_len(), 4);
+    }
+
+    #[test]
+    fn a_rate_the_collector_cannot_sustain_is_rejected() {
+        // A pass costs about 1ms at 400 processes, so 50ms already spends 2%
+        // of a core. A monitor that is itself the load is measuring itself.
+        for bad in ["1ms", "10ms", "5m"] {
+            let (s, w) = run(&format!("interval = {bad}\n"), &[]).unwrap();
+            assert_eq!(s.interval, crate::app::DEFAULT_INTERVAL, "`{bad}` stuck");
+            assert!(!w.is_empty(), "`{bad}` went unreported");
+        }
+        assert!(run("interval = 50ms\n", &[]).unwrap().1.is_empty());
+        assert!(run("interval = 60s\n", &[]).unwrap().1.is_empty());
+    }
+
+    #[test]
+    fn the_limit_belongs_to_the_pair_not_to_either_setting() {
+        // A day at one a second and ten minutes at sixty a second are the same
+        // buffer, so neither number alone can be judged.
+        assert!(
+            run("window = 24h\ninterval = 1s\n", &[])
+                .unwrap()
+                .1
+                .is_empty()
+        );
+        let (_, w) = run("window = 24h\ninterval = 500ms\n", &[]).unwrap();
+        assert_eq!(w.len(), 1, "172800 samples was accepted");
+        // And the complaint says what it would cost, since "too many samples"
+        // is not a quantity anyone can feel.
+        assert!(w[0].0.contains("MB"), "{}", w[0].0);
+    }
+
+    #[test]
+    fn a_window_shorter_than_one_sample_is_rejected() {
+        let (_, w) = run("window = 10s\ninterval = 30s\n", &[]).unwrap();
+        assert_eq!(
+            w.len(),
+            1,
+            "a buffer that cannot hold a sample was accepted"
+        );
     }
 }
