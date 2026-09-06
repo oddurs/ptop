@@ -158,6 +158,38 @@ const BLOCK: [char; 25] = [
 
 const ASCII: [char; 5] = [' ', '.', ':', '|', '#'];
 
+/// Left-to-right eighths, for a horizontal bar.
+const EIGHTHS: [char; 8] = ['▏', '▎', '▍', '▌', '▋', '▊', '▉', '█'];
+
+/// A horizontal bar `width` cells wide, filled to `frac` of full.
+///
+/// Eighths rather than whole cells: four cells at eight sub-steps each is
+/// thirty-two levels, which is enough to compare two rows at a glance. Whole
+/// cells would give four, which is not.
+///
+/// A fraction above 1.0 is real — a threaded process can exceed one core — and
+/// returns a full bar. The caller marks the overflow; silently clipping it to
+/// full would make 400% and 100% look identical.
+pub fn micro_bar(frac: f32, width: usize) -> String {
+    if !frac.is_finite() || frac <= 0.0 {
+        return " ".repeat(width);
+    }
+    let eighths = (frac.min(1.0) * (width * 8) as f32).round() as usize;
+    let full = eighths / 8;
+    let rest = eighths % 8;
+    let mut s = String::with_capacity(width);
+    for _ in 0..full.min(width) {
+        s.push('█');
+    }
+    if full < width && rest > 0 {
+        s.push(EIGHTHS[rest - 1]);
+    }
+    while s.chars().count() < width {
+        s.push(' ');
+    }
+    s
+}
+
 /// Ceilings the y-axis is allowed to take.
 ///
 /// A small fixed set rather than the observed peak, so the scale is stable
@@ -342,6 +374,37 @@ mod tests {
                 "{rows} rows lost the rule"
             );
         }
+    }
+
+    #[test]
+    fn micro_bar_is_monotonic_and_exact_width() {
+        let mut prev = 0usize;
+        for i in 0..=100 {
+            let b = micro_bar(i as f32 / 100.0, 4);
+            assert_eq!(b.chars().count(), 4, "width drifted at {i}%");
+            // Ink can only increase with the value, or two rows cannot be
+            // compared by looking at them.
+            let ink = b.chars().filter(|c| *c != ' ').count();
+            assert!(ink >= prev, "bar shrank between {}% and {i}%", i - 1);
+            prev = ink;
+        }
+        assert_eq!(micro_bar(1.0, 4), "████");
+        assert_eq!(micro_bar(0.0, 4), "    ");
+    }
+
+    #[test]
+    fn micro_bar_over_full_saturates_rather_than_overflowing() {
+        // A threaded process really can use 400% of a core.
+        assert_eq!(micro_bar(4.0, 4), "████");
+        assert_eq!(micro_bar(4.0, 4).chars().count(), 4);
+    }
+
+    #[test]
+    fn micro_bar_handles_nonsense_without_panicking() {
+        for f in [f32::NAN, f32::INFINITY, -1.0, -0.0] {
+            assert_eq!(micro_bar(f, 4).chars().count(), 4);
+        }
+        assert_eq!(micro_bar(0.5, 0), "");
     }
 
     #[test]

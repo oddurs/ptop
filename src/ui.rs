@@ -745,6 +745,9 @@ fn cursor_row(app: &App, w: Window) -> Line<'static> {
 
 fn draw_procs(f: &mut Frame, area: Rect, app: &App) {
     let rows_data = app.visible_rows();
+    // Memory bars are scaled against the displayed sample's total, not the
+    // live one, so they stay correct while scrubbed like everything else here.
+    let total_mem = app.history.current().map_or(0, |s| s.mem.total);
     let collected = app.history.current().is_some_and(|s| s.io_collected);
     let rows_visible = area.height.saturating_sub(2) as usize;
 
@@ -770,7 +773,20 @@ fn draw_procs(f: &mut Frame, area: Rect, app: &App) {
                 Cell::from(p.pid.to_string()),
                 Cell::from(p.user.to_string()),
                 Cell::from(format!("{:.1}", p.cpu)).style(app.theme.heat_style(p.cpu)),
+                // A bar beside the number turns a column that must be read
+                // into one that can be scanned. htop does the same, for the
+                // same reason.
+                //
+                // Both bars are neutral. Length already carries the magnitude,
+                // and the number beside each one already carries its status
+                // colour — colouring the bar too would spend a third channel
+                // on the same fact. Using a series hue here was worse still:
+                // that is an identity token, and a share of memory is not an
+                // identity. The C6 test caught it.
+                Cell::from(cpu_bar(p.cpu)).style(app.theme.dim_style()),
                 Cell::from(fmt_bytes(p.rss)),
+                Cell::from(glyphs::micro_bar(mem_frac(p.rss, total_mem), BAR_W))
+                    .style(app.theme.dim_style()),
                 Cell::from(p.state.to_string()),
                 Cell::from(p.threads.to_string()),
             ];
@@ -789,7 +805,7 @@ fn draw_procs(f: &mut Frame, area: Rect, app: &App) {
         })
         .collect();
 
-    let mut header_cells = vec!["PID", "USER", "CPU%", "RSS", "S", "THR"];
+    let mut header_cells = vec!["PID", "USER", "CPU%", "", "RSS", "", "S", "THR"];
     if app.show_io {
         header_cells.extend(["DISK R", "DISK W"]);
     }
@@ -808,7 +824,9 @@ fn draw_procs(f: &mut Frame, area: Rect, app: &App) {
         Constraint::Length(7),
         Constraint::Length(10),
         Constraint::Length(6),
+        Constraint::Length(BAR_W as u16 + 1), // bar, plus room for the over-100 mark
         Constraint::Length(8),
+        Constraint::Length(BAR_W as u16),
         Constraint::Length(2),
         Constraint::Length(4),
     ];
@@ -831,6 +849,32 @@ fn draw_procs(f: &mut Frame, area: Rect, app: &App) {
             ..area
         },
     );
+}
+
+/// Width of a process-table bar. Four cells at eight sub-steps is thirty-two
+/// levels, which is enough to compare two rows at a glance.
+const BAR_W: usize = 4;
+
+/// The CPU bar, with the over-one-core case marked rather than clipped.
+///
+/// A threaded process really can use 400% of a core. Clipping it to a full bar
+/// would make it indistinguishable from one using exactly 100%, so the excess
+/// gets a mark of its own.
+fn cpu_bar(pct: f32) -> String {
+    let bar = glyphs::micro_bar(pct / 100.0, BAR_W);
+    if pct > 100.0 {
+        format!("{bar}+")
+    } else {
+        format!("{bar} ")
+    }
+}
+
+/// A process's share of the machine's memory.
+fn mem_frac(rss: u64, total: u64) -> f32 {
+    if total == 0 {
+        return 0.0;
+    }
+    rss as f32 / total as f32
 }
 
 /// One disk-rate cell.

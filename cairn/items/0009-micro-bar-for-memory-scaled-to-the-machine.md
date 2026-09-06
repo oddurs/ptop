@@ -2,7 +2,7 @@
 id: 9
 title: Micro-bar for memory, scaled to the machine
 type: feature
-status: backlog
+status: done
 milestone: v0.1
 created: 2026-09-05
 updated: 2026-09-05
