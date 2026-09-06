@@ -74,6 +74,24 @@ fn default_glyphs() -> glyphs::GlyphSet {
     }
 }
 
+/// Print a line, stopping the program quietly if the reader has gone away.
+///
+/// Rust ignores SIGPIPE and turns the resulting write error into a panic, so
+/// `ptop --once | head -1` died with a backtrace. `--once` exists to be
+/// scriptable, and `| head`, `| grep -m1` and `| less` are how a scriptable
+/// thing gets used — a monitor that panics when you page its output is not one.
+///
+/// Handled in the writer rather than by restoring the signal disposition,
+/// which would need `libc` for two lines of behaviour.
+macro_rules! outln {
+    ($($arg:tt)*) => {{
+        use std::io::Write as _;
+        if writeln!(std::io::stdout(), $($arg)*).is_err() {
+            return Ok(());
+        }
+    }};
+}
+
 fn main() -> io::Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mut collector = Platform::new()?;
@@ -137,16 +155,16 @@ fn main() -> io::Result<()> {
                     count = collector.sample(needs)?.procs.len();
                 }
                 let label = if needs.io { "io on " } else { "io off" };
-                println!("{label}: {count} procs, {:?}/sample", t0.elapsed() / n);
+                outln!("{label}: {count} procs, {:?}/sample", t0.elapsed() / n);
             }
             return Ok(());
         }
         Some("--help" | "-h") => {
-            println!("{USAGE}");
+            outln!("{USAGE}");
             return Ok(());
         }
         Some("--version" | "-V") => {
-            println!("ptop {}", env!("CARGO_PKG_VERSION"));
+            outln!("ptop {}", env!("CARGO_PKG_VERSION"));
             return Ok(());
         }
         Some(other) => {
@@ -180,12 +198,12 @@ fn once(collector: &mut impl Collector) -> io::Result<()> {
     std::thread::sleep(SAMPLE_INTERVAL);
     let s = collector.sample(needs)?;
 
-    println!(
+    outln!(
         "cpu    {:.1}%  ({} cores)",
         s.cpu_total,
         s.cpu_per_core.len()
     );
-    println!(
+    outln!(
         "mem    {:.1}%  {} / {} used, {} available",
         s.mem.used_pct(),
         human(s.mem.used),
@@ -193,17 +211,17 @@ fn once(collector: &mut impl Collector) -> io::Result<()> {
         human(s.mem.available)
     );
     if s.mem.swap_total > 0 {
-        println!(
+        outln!(
             "swap   {:.1}%  {} / {}",
             s.mem.swap_pct(),
             human(s.mem.swap_used),
             human(s.mem.swap_total)
         );
     }
-    println!("load   {:.2} {:.2} {:.2}", s.load[0], s.load[1], s.load[2]);
-    println!("procs  {}", s.procs.len());
+    outln!("load   {:.2} {:.2} {:.2}", s.load[0], s.load[1], s.load[2]);
+    outln!("procs  {}", s.procs.len());
     if s.io_denied > 0 {
-        println!(
+        outln!(
             "io     {}/{} processes unreadable — run as root to see them",
             s.io_denied,
             s.procs.len()
@@ -212,9 +230,13 @@ fn once(collector: &mut impl Collector) -> io::Result<()> {
 
     let mut top = s.procs.clone();
     top.sort_by(|a, b| b.cpu.total_cmp(&a.cpu));
-    println!(
+    outln!(
         "\n{:>7}  {:>6}  {:>9}  {:>10}  {:>10}  COMMAND",
-        "PID", "CPU%", "RSS", "DISK R/s", "DISK W/s"
+        "PID",
+        "CPU%",
+        "RSS",
+        "DISK R/s",
+        "DISK W/s"
     );
     for p in top.iter().take(10) {
         // A dash, never a zero: this process could not be read, which is not
@@ -223,7 +245,7 @@ fn once(collector: &mut impl Collector) -> io::Result<()> {
             Some(io) => (human(io.read), human(io.write)),
             None => ("—".into(), "—".into()),
         };
-        println!(
+        outln!(
             "{:>7}  {:>6.1}  {:>9}  {r:>10}  {w:>10}  {}",
             p.pid,
             p.cpu,

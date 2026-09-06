@@ -30,3 +30,11 @@ jobs:
       - run: cargo clippy --all-targets -- -D warnings
       - name: smoke test the collector against live data
         run: cargo run --release -- --once
+      # Piped into a reader that stops early. Rust ignores SIGPIPE and turns
+      # the write error into a panic, so this is the regression test for
+      # `ptop --once | head` taking the tool down.
+      - name: plain-text output survives a closed pipe
+        run: |
+          set -o pipefail
+          cargo run --release -- --once | head -1
+          cargo run --release -- --help | head -1

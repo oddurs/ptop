@@ -6,7 +6,7 @@ A system monitor you can rewind.
 
 ## v0.1 — The rewind works
 
-`##########` 100% · 7 of 7 done · due 2026-10-01
+`##########` 100% · 8 of 8 done · due 2026-10-01
 
 Timeline, scrubbing, process tree, colour that survives a colourblind reader and a monochrome terminal.
 
@@ -19,6 +19,7 @@ Timeline, scrubbing, process tree, colour that survives a colourblind reader and
 - [x] `0015` The timeline is mostly empty air <sup>bug · p0</sup>
 - [x] `0016` Per-core meters render as an undifferentiated blob <sup>bug · p1</sup>
 - [x] `0017` The process table header is too heavy <sup>bug · p2</sup>
+- [x] `0018` Piping --once into head panics <sup>bug · p2</sup>
 
 ## v0.2 — Cheap enough to run
 
