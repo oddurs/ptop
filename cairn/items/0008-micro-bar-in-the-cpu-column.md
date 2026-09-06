@@ -2,7 +2,7 @@
 id: 8
 title: Micro-bar in the CPU column
 type: feature
-status: backlog
+status: done
 milestone: v0.1
 created: 2026-09-05
 updated: 2026-09-05

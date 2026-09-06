@@ -2105,3 +2105,75 @@ fn core_meters_are_countable_in_groups() {
         "cores not grouped: {meters:?}"
     );
 }
+
+#[test]
+fn the_cpu_bar_marks_a_process_using_more_than_one_core() {
+    // Clipping 400% to a full bar would make it indistinguishable from a
+    // process using exactly 100%.
+    let mut app = App::new(60);
+    let mut s = sample(50.0);
+    s.procs = vec![
+        proc_named(1, "single", 100.0, 1 << 20),
+        proc_named(2, "threaded", 400.0, 1 << 20),
+    ];
+    app.push(s);
+    app.theme = Theme::new(Palette::Safe, Tier::TrueColor);
+
+    let mut term = Terminal::new(TestBackend::new(120, 30)).unwrap();
+    term.draw(|f| ui::draw(f, &app)).unwrap();
+    let buf = term.backend().buffer();
+    let rows: Vec<String> = (0..30u16)
+        .map(|y| (0..120u16).map(|x| buf[(x, y)].symbol()).collect())
+        .collect();
+    let threaded = rows.iter().find(|r| r.contains("threaded")).unwrap();
+    let single = rows.iter().find(|r| r.contains("single")).unwrap();
+    assert!(
+        threaded.contains('+'),
+        "over-one-core not marked: {threaded:?}"
+    );
+    assert!(
+        !single.contains('+'),
+        "exactly one core wrongly marked: {single:?}"
+    );
+}
+
+#[test]
+fn the_memory_bar_is_scaled_to_the_displayed_sample() {
+    // Everything else in the table follows the cursor; a bar scaled against
+    // the live total would contradict the row it sits in.
+    let mut app = App::new(60);
+    // Oldest: a small machine, so 8G is most of it. Newest: a large one.
+    let mut old = sample(10.0);
+    old.mem.total = 16 << 30;
+    old.procs = vec![proc_named(1, "hog", 1.0, 8 << 30)];
+    let mut new = sample(10.0);
+    new.mem.total = 256 << 30;
+    new.procs = vec![proc_named(1, "hog", 1.0, 8 << 30)];
+    app.push(old);
+    app.push(new);
+    app.theme = Theme::new(Palette::Safe, Tier::TrueColor);
+
+    let ink = |app: &App| {
+        let mut term = Terminal::new(TestBackend::new(120, 30)).unwrap();
+        term.draw(|f| ui::draw(f, app)).unwrap();
+        let buf = term.backend().buffer();
+        (0..30u16)
+            .map(|y| {
+                (0..120u16)
+                    .map(|x| buf[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .find(|r| r.contains("hog"))
+            .unwrap()
+            .chars()
+            .filter(|c| "▏▎▍▌▋▊▉█".contains(*c))
+            .count()
+    };
+    let on_big_machine = ink(&app);
+    app.history.scrub(-1);
+    let on_small_machine = ink(&app);
+    assert!(
+        on_small_machine > on_big_machine,
+        "8G of 16G drew {on_small_machine} cells, 8G of 256G drew {on_big_machine}"
+    );
+}

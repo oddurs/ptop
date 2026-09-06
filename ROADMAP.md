@@ -6,19 +6,19 @@ A system monitor you can rewind.
 
 ## v0.1 — The rewind works
 
-`######····` 57% · 4 of 7 done · due 2026-10-01
+`#########·` 86% · 6 of 7 done · due 2026-10-01
 
 Timeline, scrubbing, process tree, colour that survives a colourblind reader and a monochrome terminal.
 
 ### backlog
 
-- [ ] `0008` Micro-bar in the CPU column <sup>feature · p2</sup>
-- [ ] `0009` Micro-bar for memory, scaled to the machine <sup>feature · p3</sup>
 - [ ] `0010` Per-process sparkline from history <sup>feature · p0</sup>
 
 ### done
 
 - [x] `0005` Documented responsive degradation ladder <sup>feature · p2</sup>
+- [x] `0008` Micro-bar in the CPU column <sup>feature · p2</sup>
+- [x] `0009` Micro-bar for memory, scaled to the machine <sup>feature · p3</sup>
 - [x] `0015` The timeline is mostly empty air <sup>bug · p0</sup>
 - [x] `0016` Per-core meters render as an undifferentiated blob <sup>bug · p1</sup>
 - [x] `0017` The process table header is too heavy <sup>bug · p2</sup>
