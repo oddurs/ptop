@@ -2,10 +2,10 @@
 id: 13
 title: Configurable sample interval and window
 type: feature
-status: backlog
+status: done
 milestone: v0.2
 created: 2026-09-05
-updated: 2026-09-05
+updated: 2026-09-06
 priority: p2
 effort: s
 area: config

@@ -39,6 +39,8 @@ USAGE:
     --glyphs=SET    timeline drawing: braille (default), block, or ascii.
                     Falls back to ascii automatically on a Linux console.
     --color=TIER    auto (default), mono, 16, 256, or true. Honours NO_COLOR.
+    --interval=SPAN time between samples: 500ms, 2s, 10m (default 1s)
+    --window=SPAN   history retained, as time not samples (default 10m)
     --warn=PCT      where 'getting busy' begins (default 50)
     --critical=PCT  where 'in trouble' begins (default 80). Must exceed --warn.
     --theme=NAME    safe (default), classic, or auto. 'safe' replaces green with
@@ -55,6 +57,8 @@ CONFIG:
         color    = 256
         warn     = 65       # a build box is busy at 50% and fine
         critical = 90
+        interval = 500ms    # every sample keeps a whole process table,
+        window   = 30m      # so these two together decide the memory
 
     Lowest precedence first: built-in default, config file, NO_COLOR, flag —
     so a wrapper script can override a user's file without editing it.
@@ -78,11 +82,6 @@ KEYS:
     i               toggle per-process disk IO columns
     /               filter by name or pid
 ";
-
-/// Wall-clock seconds between samples.
-const SAMPLE_INTERVAL: Duration = app::DEFAULT_INTERVAL;
-/// Samples retained, so ten minutes of scrollback at one per second.
-const HISTORY_LEN: usize = 600;
 
 /// Print a line, stopping the program quietly if the reader has gone away.
 ///
@@ -143,7 +142,7 @@ fn main() -> io::Result<()> {
     match args.first().map(String::as_str) {
         Some("--once") => {
             flush(&warnings);
-            return once(&mut collector);
+            return once(&mut collector, settings.interval);
         }
         Some("--bench") => {
             flush(&warnings);
@@ -180,7 +179,8 @@ fn main() -> io::Result<()> {
         None => {}
     }
 
-    let mut app = App::new(HISTORY_LEN);
+    let mut app = App::new(settings.history_len());
+    app.interval = settings.interval;
     app.glyphs = settings.glyphs;
     app.theme = theme::Theme::new(settings.palette, settings.tier)
         .with_thresholds(settings.warn, settings.critical);
@@ -200,10 +200,10 @@ fn main() -> io::Result<()> {
 ///
 /// Two samples are taken, one interval apart: CPU figures are deltas between
 /// reads, so a single sample could only ever report zero.
-fn once(collector: &mut impl Collector) -> io::Result<()> {
+fn once(collector: &mut impl Collector, interval: Duration) -> io::Result<()> {
     let needs = Needs { io: true };
     collector.sample(needs)?;
-    std::thread::sleep(SAMPLE_INTERVAL);
+    std::thread::sleep(interval);
     let s = collector.sample(needs)?;
 
     outln!(
@@ -279,6 +279,7 @@ fn run(
     app: &mut App,
     collector: &mut impl Collector,
 ) -> io::Result<()> {
+    let interval = app.interval;
     // A fixed cadence, not "one interval after the last sample finished".
     //
     // Restarting the clock after collection adds the collect and draw time to
@@ -286,7 +287,7 @@ fn run(
     // claim — on a box with thousands of processes, far enough that the gap
     // detector would see a missed tick on every single cell and paint the
     // whole graph as seams. The interval is a schedule, so schedule against it.
-    let mut next_sample = Instant::now() + SAMPLE_INTERVAL;
+    let mut next_sample = Instant::now() + interval;
 
     loop {
         terminal.draw(|f| ui::draw(f, app))?;
@@ -306,7 +307,7 @@ fn run(
             // cursor stays put, the buffer keeps filling behind it.
             app.push(collector.sample(app.needs())?);
             app.clamp_selection();
-            next_sample += SAMPLE_INTERVAL;
+            next_sample += interval;
             // Falling a whole interval behind means the host cannot sustain
             // the rate. Resync rather than catch up: catching up would sample
             // flat out until the backlog cleared, which is the worst thing to
@@ -315,7 +316,7 @@ fn run(
             // so — that is what the seam is for.
             let now = Instant::now();
             if next_sample <= now {
-                next_sample = now + SAMPLE_INTERVAL;
+                next_sample = now + interval;
             }
         }
 

@@ -203,6 +203,8 @@ glyphs   = block    # comments run to the end of the line
 color    = 256
 warn     = 65       # a build box is busy at 50% and perfectly fine
 critical = 90
+interval = 500ms    # every sample keeps a whole process table,
+window   = 30m      # so these two together decide the memory
 ```
 
 `warn` and `critical` are where the status colours change, where the timeline
@@ -251,6 +253,49 @@ has outgrown it.
 One table defines every setting once, and both the file and the command line
 drive it, so `theme = classic` and `--theme=classic` cannot come to disagree
 about what a value means.
+
+### Sample rate and window
+
+`interval` is the time between samples; `window` is how much history to keep,
+**expressed in time rather than a sample count** — the span is what you
+actually want, and the buffer size follows from it. Spans are written the way
+people write them: `500ms`, `2s`, `10m`, `1h`. A bare number is seconds,
+because that is what someone typing `interval = 2` means.
+
+Sub-second sampling narrows the window in which a short-lived process is
+invisible; longer intervals stretch the retained span on a quiet box. The ring
+buffer already tolerates uneven intervals, because the timestamps are real.
+
+**The two settings cost memory together, not separately.** Every sample retains
+its whole process table — that is what makes scrubbing show the real table from
+that instant rather than an interpolation — so the buffer is about
+`samples × processes × 96 bytes`:
+
+| processes | 10m at 1s | 1h at 1s | 10m at 100ms |
+|---|---|---|---|
+| 100 | 6 MB | 35 MB | 59 MB |
+| 400 | 23 MB | 139 MB | 231 MB |
+| 4000 | 231 MB | 1.4 GB | 2.3 GB |
+
+(a buffer holds one more sample than the span needs — `n` samples span `n − 1`
+intervals — so the real figures are a few kilobytes above these)
+
+(measured by the `show_sample_footprint` test, so the table can't drift from
+the structs)
+
+A day of history at one sample a second and ten minutes at sixty a second are
+the same buffer, so ptop bounds the **product** — the sample count — rather
+than either setting, and says what the buffer would cost when it refuses:
+
+```
+ptop: `window` 86400s at `interval` 500ms is 172801 samples, above the limit
+      of 86401; every sample retains a whole process table, which is about
+      6663 MB on a 400-process box
+```
+
+The interval is also bounded below at 50ms: a collection pass costs about 1 ms
+at 400 processes, so 50 ms already spends 2% of a core and 10 ms would spend
+10%. A monitor that is itself the load is not measuring the machine.
 
 ## How it works
 

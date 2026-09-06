@@ -2617,3 +2617,70 @@ fn the_legend_degrades_rather_than_truncating_a_word() {
         );
     }
 }
+
+#[test]
+#[ignore]
+fn show_sample_footprint() {
+    use crate::sample::{ProcSample, Sample};
+    println!("ProcSample: {} bytes", std::mem::size_of::<ProcSample>());
+    println!("Sample:     {} bytes", std::mem::size_of::<Sample>());
+    for procs in [100usize, 400, 4000] {
+        let per = std::mem::size_of::<Sample>() + procs * std::mem::size_of::<ProcSample>();
+        for (label, samples) in [
+            ("10m at 1s", 600usize),
+            ("1h at 1s", 3600),
+            ("10m at 100ms", 6000),
+            ("cap", 86_400),
+        ] {
+            println!(
+                "{procs:5} procs, {label:14} = {samples:6} samples -> {:6.1} MB",
+                (per * samples) as f64 / 1e6
+            );
+        }
+    }
+}
+
+#[test]
+fn spans_are_legible_at_both_ends_of_the_configurable_range() {
+    // Whole seconds rendered a 100ms slot as `0s/slot` — the exact mode
+    // sub-second sampling exists for — and a day-long window as `1440m00s`,
+    // which is a number nobody reads as a day.
+    for (ms, want) in [
+        (50u64, "50ms"),
+        (500, "500ms"),
+        (1_000, "1s"),
+        (59_000, "59s"),
+        (60_000, "1m00s"),
+        (380_000, "6m20s"),
+        (3_600_000, "1h00m"),
+        (86_400_000, "24h00m"),
+    ] {
+        assert_eq!(
+            ui::fmt_lag_for_test(std::time::Duration::from_millis(ms)),
+            want
+        );
+    }
+}
+
+#[test]
+fn a_busy_frame_at_a_fast_rate_is_not_a_gap() {
+    // At `interval = 50ms` a frame that took 100ms to draw and collect is
+    // twice the nominal rate, and without a floor the timeline would paint
+    // itself full of seams for a monitor that is merely busy.
+    let base = std::time::SystemTime::UNIX_EPOCH;
+    let at = |ms: u64| base + std::time::Duration::from_millis(ms);
+    let fast = std::time::Duration::from_millis(50);
+
+    let busy = [at(0), at(100), at(220), at(300)];
+    assert_eq!(
+        crate::history::gaps_in(&busy, fast),
+        vec![false; 4],
+        "a busy frame at 50ms was reported as time missing"
+    );
+    // A real stall still is one.
+    let stalled = [at(0), at(50), at(2_000)];
+    assert_eq!(
+        crate::history::gaps_in(&stalled, fast),
+        vec![false, false, true]
+    );
+}
