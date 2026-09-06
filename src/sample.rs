@@ -66,6 +66,12 @@ pub struct ProcSample {
     pub rss: u64,
     pub threads: u32,
     pub state: char,
+    /// When the process started, in whatever unit the platform counts.
+    ///
+    /// Only ever compared for equality, never interpreted — it exists so a
+    /// process can be followed across samples without a recycled pid splicing
+    /// two unrelated processes into one line.
+    pub started: u64,
     /// `None` means no figure is available — either extended collection was off
     /// when this sample was taken, or the process could not be read. The two
     /// cases are told apart by [`Sample::io_collected`], and neither is ever

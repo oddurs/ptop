@@ -748,6 +748,40 @@ fn draw_procs(f: &mut Frame, area: Rect, app: &App) {
     // Memory bars are scaled against the displayed sample's total, not the
     // live one, so they stay correct while scrubbed like everything else here.
     let total_mem = app.history.current().map_or(0, |s| s.mem.total);
+
+    // Per-process history, for the rows actually on screen.
+    //
+    // This is the thing no other monitor can draw. Every retained sample holds
+    // its whole process list, so "what has *this* process been doing" is
+    // already in the buffer — htop, btop and bottom keep no per-process
+    // history, zenith's is aggregate-only, and atop has the data but replays
+    // whole intervals from a logfile rather than putting a trend beside a row.
+    let visible_rows = area.height.saturating_sub(2) as usize;
+    let row_offset = app.selected.saturating_sub(visible_rows.saturating_sub(1));
+    let keys: Vec<(i32, u64)> = rows_data
+        .iter()
+        .skip(row_offset)
+        .take(visible_rows)
+        .map(|r| (r.proc.pid, r.proc.started))
+        .collect();
+    // The whole retained buffer, not a slice of it. A per-row summary that
+    // shifted every time the timeline zoomed would be a second, contradictory
+    // reading of the same history; "what this process has been doing" is a
+    // fixed question with a fixed answer.
+    let series = history::series_for(&app.history, &keys, app.history.len());
+    let spark_slots = SPARK_W * app.glyphs.samples_per_cell();
+    let spark_zoom = app.history.len().div_ceil(spark_slots.max(1)).max(1);
+
+    // One ceiling across every row. Scaling each sparkline to its own peak
+    // makes a flat 12% process look exactly like one spiking to 90%, which
+    // defeats the only reason to put them in a column together.
+    let spark_ceiling = glyphs::ceiling_for(
+        series
+            .values()
+            .flat_map(|v| v.iter().flatten())
+            .copied()
+            .fold(0.0_f32, f32::max),
+    );
     let collected = app.history.current().is_some_and(|s| s.io_collected);
     let rows_visible = area.height.saturating_sub(2) as usize;
 
@@ -797,6 +831,17 @@ fn draw_procs(f: &mut Frame, area: Rect, app: &App) {
             // The spine is structural, not data: it takes the chrome token so
             // it recedes the way a gridline should, while the name stays at
             // full contrast.
+            // The sparkline sits before the command, so the eye can run down
+            // a column of shapes rather than hunting for it past ragged names.
+            cells.push(
+                Cell::from(sparkline(
+                    series.get(&(p.pid, p.started)).map(Vec::as_slice),
+                    app.glyphs,
+                    spark_zoom,
+                    spark_ceiling,
+                ))
+                .style(app.theme.dim_style()),
+            );
             cells.push(Cell::from(Line::from(vec![
                 Span::styled(r.prefix.clone(), app.theme.chrome_style()),
                 Span::raw(p.name.to_string()),
@@ -805,7 +850,7 @@ fn draw_procs(f: &mut Frame, area: Rect, app: &App) {
         })
         .collect();
 
-    let mut header_cells = vec!["PID", "USER", "CPU%", "", "RSS", "", "S", "THR"];
+    let mut header_cells = vec!["PID", "USER", "CPU%", "", "RSS", "", "S", "THR", "HISTORY"];
     if app.show_io {
         header_cells.extend(["DISK R", "DISK W"]);
     }
@@ -834,6 +879,7 @@ fn draw_procs(f: &mut Frame, area: Rect, app: &App) {
         widths.push(Constraint::Length(9));
         widths.push(Constraint::Length(9));
     }
+    widths.push(Constraint::Length(SPARK_W as u16));
     widths.push(Constraint::Min(10));
 
     f.render_widget(
@@ -849,6 +895,36 @@ fn draw_procs(f: &mut Frame, area: Rect, app: &App) {
             ..area
         },
     );
+}
+
+/// Width of the per-process history sparkline, in cells.
+const SPARK_W: usize = 10;
+
+/// One process's CPU history as a sparkline.
+///
+/// Peak aggregation, like the timeline: averaging a spike with idle samples
+/// renders it as nothing, and a spike is the entire reason to look.
+///
+/// A process absent from a sample leaves a gap rather than a zero. "It was not
+/// running" and "it was running and idle" are different facts, and a graph that
+/// conflates them invents history.
+fn sparkline(series: Option<&[Option<f32>]>, set: GlyphSet, zoom: usize, ceiling: f32) -> String {
+    let Some(series) = series else {
+        return " ".repeat(SPARK_W);
+    };
+    let spc = set.samples_per_cell();
+    let slots = SPARK_W * spc;
+    let values: Vec<f32> = series.iter().map(|v| v.unwrap_or(0.0)).collect();
+    let agg = history::peak_slots(&values, zoom.max(1), slots);
+    agg.chunks(spc)
+        .map(|cell| {
+            let a = cell[0].unwrap_or(0.0);
+            let b = *cell.get(1).and_then(|v| v.as_ref()).unwrap_or(&a);
+            let l = glyphs::level_in_row_scaled(a, 0, 1, ceiling);
+            let r = glyphs::level_in_row_scaled(b, 0, 1, ceiling);
+            set.glyph(l, r)
+        })
+        .collect()
 }
 
 /// Width of a process-table bar. Four cells at eight sub-steps is thirty-two

@@ -21,6 +21,7 @@ fn proc_named(pid: i32, name: &str, cpu: f32, rss: u64) -> ProcSample {
         rss,
         threads: 1,
         state: 'S',
+        started: 0,
         io: None,
     }
 }
@@ -2175,5 +2176,163 @@ fn the_memory_bar_is_scaled_to_the_displayed_sample() {
     assert!(
         on_small_machine > on_big_machine,
         "8G of 16G drew {on_small_machine} cells, 8G of 256G drew {on_big_machine}"
+    );
+}
+
+/// A history where each process has a distinct, recognisable CPU shape.
+fn app_with_shapes() -> App {
+    let mut app = App::new(600);
+    for i in (0..120).rev() {
+        let x = (120 - i) as f32;
+        let mut s = sample_at(30.0, i as u64);
+        s.procs = vec![
+            ProcSample {
+                cpu: 45.0 + 35.0 * (x * 0.3).sin(),
+                ..proc_named(824, "wave", 0.0, 512 << 20)
+            },
+            ProcSample {
+                cpu: 2.0,
+                ..proc_named(2077, "flat", 0.0, 148 << 20)
+            },
+            ProcSample {
+                cpu: x.min(80.0),
+                ..proc_named(3001, "ramping", 0.0, 64 << 20)
+            },
+        ];
+        app.push(s);
+    }
+    app.theme = Theme::new(Palette::Safe, Tier::TrueColor);
+    app
+}
+
+/// The sparkline drawn for a named process.
+fn spark_for(app: &App, name: &str) -> String {
+    let mut term = Terminal::new(TestBackend::new(110, 24)).unwrap();
+    term.draw(|f| ui::draw(f, app)).unwrap();
+    let buf = term.backend().buffer();
+    let row = (0..24u16)
+        .map(|y| {
+            (0..110u16)
+                .map(|x| buf[(x, y)].symbol())
+                .collect::<String>()
+        })
+        .find(|r| r.contains(name))
+        .unwrap_or_else(|| panic!("{name} not on screen"));
+    row.chars()
+        .filter(|c| ('\u{2800}'..='\u{28ff}').contains(c))
+        .collect()
+}
+
+#[test]
+fn each_process_gets_its_own_history() {
+    // The differentiator: every retained sample holds its whole process list,
+    // so "what has *this* process been doing" is already in the buffer. No
+    // other monitor keeps per-process history to answer it from.
+    let app = app_with_shapes();
+    let wave = spark_for(&app, "wave");
+    let flat = spark_for(&app, "flat");
+    let ramping = spark_for(&app, "ramping");
+
+    assert_eq!(wave.chars().count(), 10);
+    assert_ne!(
+        wave, flat,
+        "two different histories drew the same sparkline"
+    );
+    assert_ne!(wave, ramping);
+    assert_ne!(flat, ramping);
+}
+
+#[test]
+fn sparklines_share_one_scale_so_rows_can_be_compared() {
+    // Scaled per row, a flat 2% process looks exactly like one spiking to 80%,
+    // which defeats the only reason to put them in a column together.
+    let app = app_with_shapes();
+    let ink = |name: &str| {
+        spark_for(&app, name)
+            .chars()
+            .map(|c| (c as u32 - 0x2800).count_ones())
+            .sum::<u32>()
+    };
+    assert!(
+        ink("flat") < ink("wave"),
+        "a 2% process drew as much ink as one averaging 45%"
+    );
+}
+
+#[test]
+fn a_reused_pid_does_not_splice_two_processes_into_one_line() {
+    // Matched on pid alone, a recycled pid would draw a graph of two different
+    // programs — the same trap the name cache had, with a worse result.
+    let mut app = App::new(600);
+    for i in (0..60).rev() {
+        let mut s = sample_at(10.0, i as u64);
+        // Same pid throughout, but a different process for the first half.
+        let (started, cpu) = if i > 30 { (111, 90.0) } else { (222, 2.0) };
+        s.procs = vec![ProcSample {
+            cpu,
+            started,
+            ..proc_named(4242, "recycled", 0.0, 1 << 20)
+        }];
+        app.push(s);
+    }
+    app.theme = Theme::new(Palette::Safe, Tier::TrueColor);
+
+    // The live process started at 222 and has only ever been at 2%. Its
+    // sparkline must not show the 90% the previous occupant of that pid had.
+    let spark = spark_for(&app, "recycled");
+    let ink: u32 = spark
+        .chars()
+        .map(|c| (c as u32 - 0x2800).count_ones())
+        .sum();
+    let full: u32 = spark.chars().count() as u32 * 8;
+    assert!(
+        ink * 3 < full,
+        "sparkline shows the previous process's history: {spark:?}"
+    );
+}
+
+#[test]
+fn a_process_absent_from_a_sample_leaves_a_gap_not_a_zero() {
+    // "It was not running" and "it was running and idle" are different facts.
+    use crate::history::series_for;
+    let mut app = App::new(600);
+    for i in (0..10).rev() {
+        let mut s = sample_at(10.0, i as u64);
+        // Present only in the newest half.
+        s.procs = if i < 5 {
+            vec![proc_named(7, "late", 50.0, 1 << 20)]
+        } else {
+            vec![]
+        };
+        app.push(s);
+    }
+    let series = series_for(&app.history, &[(7, 0)], 10);
+    let s = &series[&(7, 0)];
+    assert_eq!(s.len(), 10);
+    assert!(s[..5].iter().all(Option::is_none), "absence became data");
+    assert!(s[5..].iter().all(Option::is_some), "presence became a gap");
+}
+
+#[test]
+#[ignore = "measurement"]
+fn measure_render_with_sparklines() {
+    let mut app = App::new(600);
+    for i in (0..600).rev() {
+        let mut s = sample_at((i as f32 * 1.7) % 100.0, i as u64);
+        s.procs = (0..900)
+            .map(|p| proc_named(p, "some-process-name", (p as f32) % 100.0, 1 << 20))
+            .collect();
+        app.push(s);
+    }
+    app.theme = Theme::new(Palette::Safe, Tier::TrueColor);
+    let mut term = Terminal::new(TestBackend::new(200, 60)).unwrap();
+    let n = 50;
+    let t0 = std::time::Instant::now();
+    for _ in 0..n {
+        term.draw(|f| ui::draw(f, &app)).unwrap();
+    }
+    println!(
+        "  render: {:?}/frame at 900 procs x 600 samples, 200x60",
+        t0.elapsed() / n
     );
 }

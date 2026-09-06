@@ -113,6 +113,51 @@ impl History {
     }
 }
 
+/// CPU history for a set of processes, over the newest `window` samples.
+///
+/// Returns one series per requested key, aligned oldest-first, with `None`
+/// wherever the process was not present in that sample — a process that has
+/// only just started leaves a gap rather than a run of zeroes, which would
+/// read as "it was here and idle".
+///
+/// Keyed on pid **and** start time. On pid alone a recycled pid splices two
+/// unrelated processes into one line, which is the same trap the name cache
+/// had, with a more misleading result: a graph of two different programs.
+///
+/// One pass over the window, checking each process against the requested set,
+/// rather than a scan per process per sample. The set is the visible rows, so
+/// it is bounded by the terminal height however many processes the machine has.
+pub fn series_for(
+    history: &History,
+    keys: &[(i32, u64)],
+    window: usize,
+) -> std::collections::HashMap<(i32, u64), Vec<Option<f32>>> {
+    use std::collections::{HashMap, HashSet};
+    let wanted: HashSet<(i32, u64)> = keys.iter().copied().collect();
+    let mut out: HashMap<(i32, u64), Vec<Option<f32>>> = keys
+        .iter()
+        .map(|&k| (k, Vec::with_capacity(window)))
+        .collect();
+
+    let skip = history.len().saturating_sub(window);
+    for sample in history.iter().skip(skip) {
+        // Start every series with a gap, then fill the ones this sample has.
+        for series in out.values_mut() {
+            series.push(None);
+        }
+        for p in &sample.procs {
+            let key = (p.pid, p.started);
+            if wanted.contains(&key)
+                && let Some(series) = out.get_mut(&key)
+                && let Some(last) = series.last_mut()
+            {
+                *last = Some(p.cpu);
+            }
+        }
+    }
+    out
+}
+
 /// Aggregate the newest values into exactly `slots` display slots.
 ///
 /// Right-aligned on purpose: the newest value in `values` always lands in the

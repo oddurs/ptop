@@ -389,6 +389,7 @@ fn parse_proc_stat(
         rss: rss_pages * ctx.page_size,
         threads,
         state,
+        started: starttime,
         io: None,
     })
 }
