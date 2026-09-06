@@ -154,12 +154,21 @@ pub fn delta_e(a: [u8; 3], b: [u8; 3], kind: Option<Cvd>) -> f64 {
 /// 1, so a simulation can *increase* separation — meaning a pair that is too
 /// close for everyone could pass a CVD-only check. Folding unsimulated vision
 /// in makes the guard as wide as the claim it backs.
-pub fn worst_cvd(a: [u8; 3], b: [u8; 3]) -> f64 {
+/// Returns the vision it belongs to alongside the figure. `None` there means
+/// normal vision was the worst case — not a curiosity, but exactly the case a
+/// deficiency-only check would miss, and a report naming a number without its
+/// subject is half a report.
+pub fn worst_cvd(a: [u8; 3], b: [u8; 3]) -> (f64, Option<Cvd>) {
     Cvd::ALL
         .iter()
-        .map(|&k| delta_e(a, b, Some(k)))
-        .chain(std::iter::once(delta_e(a, b, None)))
-        .fold(f64::INFINITY, f64::min)
+        .map(|&k| (delta_e(a, b, Some(k)), Some(k)))
+        .chain(std::iter::once((delta_e(a, b, None), None)))
+        .fold(
+            (f64::INFINITY, None),
+            |acc, x| {
+                if x.0 < acc.0 { x } else { acc }
+            },
+        )
 }
 
 /// WCAG relative luminance contrast ratio. Used to check a colour is legible on
@@ -203,7 +212,7 @@ mod tests {
 
         let crit = [0xff, 0x66, 0x66];
         let mem = [0xb4, 0x8e, 0xad];
-        let d = worst_cvd(crit, mem);
+        let d = worst_cvd(crit, mem).0;
         assert!(near(d, 10.3), "safe crit<->mem: got {d:.2}, expected 10.3");
     }
 
@@ -259,7 +268,7 @@ mod tests {
         // pair that nobody can tell apart.
         let a = [0x80, 0x80, 0x80];
         let b = [0x82, 0x82, 0x82];
-        assert!(worst_cvd(a, b) <= delta_e(a, b, None) + 1e-9);
+        assert!(worst_cvd(a, b).0 <= delta_e(a, b, None) + 1e-9);
     }
 
     #[test]

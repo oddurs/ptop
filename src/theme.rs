@@ -166,6 +166,23 @@ impl Palette {
         }
     }
 
+    /// Why this palette knowingly fails the separation target, if it does.
+    ///
+    /// Stated by the palette rather than discovered by the checker, so
+    /// `--check-theme classic` reads as the choice it is rather than as ptop
+    /// failing its own check.
+    pub fn caveat(self) -> Option<&'static str> {
+        match self {
+            Self::Safe => None,
+            Self::Classic => Some(
+                "`classic` is knowingly below the target: it restores the green/yellow \
+                 convention, and green/yellow is the pair that convention gets wrong under \
+                 red-green deficiency, which affects roughly 8% of men. `safe` is the \
+                 default for exactly this reason.",
+            ),
+        }
+    }
+
     pub fn parse(s: &str) -> Option<Self> {
         match s {
             "safe" => Some(Self::Safe),
@@ -826,28 +843,15 @@ mod tests {
     #[test]
     fn the_safe_palette_meets_its_separation_target() {
         // This is the claim in `safe_truecolor`'s doc comment, enforced. A hex
-        // nudged by eye now fails the build rather than a reviewer's judgement.
-        use crate::cvd::{CVD_TARGET, to_rgb, worst_cvd};
+        // nudged by eye fails the build rather than a reviewer's judgement.
+        //
+        // Asserted through `check::Report` — the same instrument
+        // `--check-theme` prints. A separate copy of the arithmetic here would
+        // let CI and the user's own check disagree about the same palette,
+        // which would make the outward-facing one worthless.
         for tier in [Tier::Ansi256, Tier::TrueColor] {
-            let th = Theme::new(Palette::Safe, tier);
-            let cols = meaning_bearing(&th);
-            let mut worst = (f64::INFINITY, "", "");
-            for (i, (an, a)) in cols.iter().enumerate() {
-                for (bn, b) in &cols[i + 1..] {
-                    let (ra, rb) = (to_rgb(*a).unwrap(), to_rgb(*b).unwrap());
-                    let d = worst_cvd(ra, rb);
-                    if d < worst.0 {
-                        worst = (d, an, bn);
-                    }
-                }
-            }
-            assert!(
-                worst.0 >= CVD_TARGET,
-                "{tier:?}: worst pair {} <-> {} is dE {:.1}, below the target of {CVD_TARGET}",
-                worst.1,
-                worst.2,
-                worst.0
-            );
+            let report = crate::check::Report::of("safe", &Theme::new(Palette::Safe, tier));
+            assert!(report.passes(), "{tier:?}:\n{report}");
         }
     }
 
@@ -856,21 +860,21 @@ mod tests {
         // Separation between hues says nothing about whether a hue is visible
         // at all. The first 256-colour attempt cleared ΔE comfortably while
         // sitting at 2.03:1 on the selected row.
-        use crate::cvd::{contrast, to_rgb};
-        const MIN_CONTRAST: f64 = 3.0;
+        //
+        // Both backgrounds are in the report, so this is the same assertion as
+        // above viewed from the other side; kept separate because the two
+        // failures mean different things and deserve different names.
         for tier in [Tier::Ansi256, Tier::TrueColor] {
-            let th = Theme::new(Palette::Safe, tier);
-            let surface = [0x1a, 0x1a, 0x19];
-            let selected = to_rgb(th.selection_bg).unwrap();
-            for (name, c) in meaning_bearing(&th) {
-                let rgb = to_rgb(c).unwrap();
-                for (bg_name, bg) in [("surface", surface), ("selected row", selected)] {
-                    let r = contrast(rgb, bg);
-                    assert!(
-                        r >= MIN_CONTRAST,
-                        "{tier:?}: {name} is {r:.2}:1 against the {bg_name}, below {MIN_CONTRAST}:1"
-                    );
-                }
+            let report = crate::check::Report::of("safe", &Theme::new(Palette::Safe, tier));
+            for l in &report.legibility {
+                assert!(
+                    l.passes(),
+                    "{tier:?}: {} is {:.2}:1 against the {}, below {}:1",
+                    l.token,
+                    l.ratio,
+                    l.background,
+                    crate::check::MIN_CONTRAST
+                );
             }
         }
     }
@@ -879,20 +883,25 @@ mod tests {
     fn the_classic_palette_is_knowingly_below_the_target() {
         // Not a bug: classic exists to restore the convention, and the whole
         // reason `safe` is the default is that this pair is indistinguishable.
-        // Pinned so that "improving" classic is a deliberate act, not a
-        // silent one that removes the argument for the default.
-        use crate::cvd::{CVD_TARGET, Cvd, delta_e, to_rgb};
-        let th = Theme::new(Palette::Classic, Tier::TrueColor);
-        let d = delta_e(
-            to_rgb(th.ok).unwrap(),
-            to_rgb(th.warn).unwrap(),
-            Some(Cvd::Protan),
-        );
+        // Pinned so that "improving" classic is a deliberate act, not a silent
+        // one that removes the argument for the default.
+        let report =
+            crate::check::Report::of("classic", &Theme::new(Palette::Classic, Tier::TrueColor));
         assert!(
-            d < CVD_TARGET,
-            "classic ok<->warn is dE {d:.1}; if this now passes, the case for \
-             `safe` being the default has changed and the docs need revisiting"
+            !report.passes(),
+            "classic now passes its own check; the case for `safe` being the \
+             default has changed and the docs need revisiting:\n{report}"
         );
+        let worst = report.worst_pair().expect("a palette has pairs");
+        assert_eq!(
+            (worst.a, worst.b),
+            ("ok", "warn"),
+            "classic's worst pair is no longer green/yellow, which is the pair \
+             the whole argument is about"
+        );
+        // …and the caveat has to be the thing `--check-theme` shows a user, or
+        // ptop reads as failing its own check.
+        assert!(Palette::Classic.caveat().is_some());
     }
 
     #[test]
@@ -1002,7 +1011,7 @@ mod tests {
                 to_rgb(series.series_cpu).unwrap(),
                 to_rgb(series.series_mem).unwrap(),
             );
-            assert!(worst_cvd(cpu, mem) >= CVD_TARGET);
+            assert!(worst_cvd(cpu, mem).0 >= CVD_TARGET);
             for palette in [Palette::Safe, Palette::Classic] {
                 let th = Theme::new(palette, tier);
                 assert_eq!(th.series_cpu, series.series_cpu, "identity hues diverged");
@@ -1010,7 +1019,7 @@ mod tests {
                 for (name, s) in [("ok", th.ok), ("warn", th.warn), ("crit", th.critical)] {
                     let s = to_rgb(s).unwrap();
                     for (sn, sv) in [("cpu", cpu), ("mem", mem)] {
-                        let d = worst_cvd(sv, s);
+                        let d = worst_cvd(sv, s).0;
                         assert!(
                             d >= CVD_TARGET,
                             "{palette:?}/{tier:?}: {sn} vs {name} is dE {d:.1}"
