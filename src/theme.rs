@@ -50,7 +50,10 @@ use ratatui::style::{Color, Modifier, Style};
 // `status_and_identity_hues_stay_in_their_own_panels` in `ui_tests`.
 
 /// How much colour the terminal can be trusted with.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+///
+/// Ordered, so "can this terminal show that colour" is a comparison rather
+/// than a match. The variants are declared least to most capable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default)]
 pub enum Tier {
     /// No colour at all. Meaning is carried by weight, reverse video and glyphs.
     Mono,
@@ -154,6 +157,15 @@ pub enum Palette {
 }
 
 impl Palette {
+    /// The name this palette is written as, so a resolved theme can say which
+    /// built-in it is without the caller matching on the enum.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Safe => "safe",
+            Self::Classic => "classic",
+        }
+    }
+
     pub fn parse(s: &str) -> Option<Self> {
         match s {
             "safe" => Some(Self::Safe),
@@ -1048,5 +1060,190 @@ mod tests {
         assert_eq!(Tier::parse("256"), Some(Tier::Ansi256));
         assert_eq!(Tier::parse("true"), Some(Tier::TrueColor));
         assert_eq!(Tier::parse("nonsense"), None);
+    }
+}
+
+/// The themeable tokens.
+///
+/// Exactly the vocabulary the palette was built around: a status is a state,
+/// a series is an identity, and chrome is neither. Nothing new is invented for
+/// user themes — a theme that could name colours the code does not use would
+/// be a second vocabulary to keep in step with the first.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Token {
+    Ok,
+    Warn,
+    Critical,
+    SeriesCpu,
+    SeriesMem,
+    Chrome,
+    Text,
+    TextDim,
+    SelectionBg,
+    Live,
+}
+
+impl Token {
+    /// Every token, in the order a theme file should list them.
+    pub const ALL: [Token; 10] = [
+        Token::Ok,
+        Token::Warn,
+        Token::Critical,
+        Token::SeriesCpu,
+        Token::SeriesMem,
+        Token::Chrome,
+        Token::Text,
+        Token::TextDim,
+        Token::SelectionBg,
+        Token::Live,
+    ];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Token::Ok => "ok",
+            Token::Warn => "warn",
+            Token::Critical => "critical",
+            Token::SeriesCpu => "series_cpu",
+            Token::SeriesMem => "series_mem",
+            Token::Chrome => "chrome",
+            Token::Text => "text",
+            Token::TextDim => "text_dim",
+            Token::SelectionBg => "selection_bg",
+            Token::Live => "live",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|t| t.name() == s)
+    }
+
+    pub fn get(self, theme: &Theme) -> Color {
+        match self {
+            Token::Ok => theme.ok,
+            Token::Warn => theme.warn,
+            Token::Critical => theme.critical,
+            Token::SeriesCpu => theme.series_cpu,
+            Token::SeriesMem => theme.series_mem,
+            Token::Chrome => theme.chrome,
+            Token::Text => theme.text,
+            Token::TextDim => theme.text_dim,
+            Token::SelectionBg => theme.selection_bg,
+            Token::Live => theme.live,
+        }
+    }
+
+    fn set(self, theme: &mut Theme, c: Color) {
+        match self {
+            Token::Ok => theme.ok = c,
+            Token::Warn => theme.warn = c,
+            Token::Critical => theme.critical = c,
+            Token::SeriesCpu => theme.series_cpu = c,
+            Token::SeriesMem => theme.series_mem = c,
+            Token::Chrome => theme.chrome = c,
+            Token::Text => theme.text = c,
+            Token::TextDim => theme.text_dim = c,
+            Token::SelectionBg => theme.selection_bg = c,
+            Token::Live => theme.live = c,
+        }
+    }
+}
+
+/// A colour written three ways: `#5ccfe6`, a 256-colour index, or an ANSI name.
+///
+/// All three, because all three are the right answer at some tier. Hex is what
+/// a designer hands you; an index is what someone matching a 256-colour scheme
+/// has; a name is the only thing that means anything on a 16-colour terminal,
+/// where the actual hue belongs to the user's terminal theme and not to ptop.
+pub fn parse_color(s: &str) -> Option<Color> {
+    if let Some(hex) = s.strip_prefix('#') {
+        if hex.len() != 6 || !hex.chars().all(|c| c.is_ascii_hexdigit()) {
+            return None;
+        }
+        let byte = |i: usize| u8::from_str_radix(&hex[i..i + 2], 16).ok();
+        return Some(Color::Rgb(byte(0)?, byte(2)?, byte(4)?));
+    }
+    if let Ok(n) = s.parse::<u8>() {
+        // Only when the whole string is the number: `80x` is a typo, not 80.
+        if s.chars().all(|c| c.is_ascii_digit()) {
+            return Some(Color::Indexed(n));
+        }
+    }
+    Some(match s {
+        "black" => Color::Black,
+        "red" => Color::Red,
+        "green" => Color::Green,
+        "yellow" => Color::Yellow,
+        "blue" => Color::Blue,
+        "magenta" => Color::Magenta,
+        "cyan" => Color::Cyan,
+        "gray" | "grey" => Color::Gray,
+        "darkgray" | "darkgrey" => Color::DarkGray,
+        "lightred" => Color::LightRed,
+        "lightgreen" => Color::LightGreen,
+        "lightyellow" => Color::LightYellow,
+        "lightblue" => Color::LightBlue,
+        "lightmagenta" => Color::LightMagenta,
+        "lightcyan" => Color::LightCyan,
+        "white" => Color::White,
+        // The terminal's own foreground. The only way to say "leave this one
+        // alone" in a file whose every other value picks something.
+        "default" | "reset" => Color::Reset,
+        _ => return None,
+    })
+}
+
+/// How a colour is written back out, so a theme file round-trips.
+pub fn write_color(c: Color) -> String {
+    match c {
+        Color::Rgb(r, g, b) => format!("#{r:02x}{g:02x}{b:02x}"),
+        Color::Indexed(n) => n.to_string(),
+        Color::Reset => "default".to_string(),
+        other => format!("{other:?}").to_lowercase(),
+    }
+}
+
+impl Tier {
+    /// The lowest tier that can show a colour as written.
+    ///
+    /// There is no quantisation here on purpose. Squeezing 24-bit hex into
+    /// sixteen slots would destroy exactly the separation the palettes were
+    /// measured for — and the sixteen slots do not belong to ptop anyway, they
+    /// belong to the user's terminal theme. A colour the tier cannot show is
+    /// therefore left alone and reported, not approximated.
+    pub fn needed_for(c: Color) -> Tier {
+        match c {
+            Color::Rgb(..) => Tier::TrueColor,
+            // Indices 0-15 *are* the ANSI slots: `ok = 6` and `ok = cyan` name
+            // the same thing, and a 16-colour terminal renders both. Only the
+            // cube above them needs a 256-colour terminal.
+            Color::Indexed(0..=15) => Tier::Ansi16,
+            Color::Indexed(..) => Tier::Ansi256,
+            _ => Tier::Ansi16,
+        }
+    }
+}
+
+impl Theme {
+    /// This theme with a user's tokens written over it.
+    ///
+    /// Returns the tokens it could not apply, which are the ones this terminal
+    /// cannot show as written. Silently dropping them would leave a user
+    /// staring at the built-in palette wondering why their file did nothing.
+    pub fn with_overrides(mut self, overrides: &[(Token, Color)]) -> (Self, Vec<Token>) {
+        // Monochrome ignores palettes entirely, which is the clearest possible
+        // statement that meaning never rests on colour here. A user theme does
+        // not get to weaken that.
+        if self.tier == Tier::Mono {
+            return (self, overrides.iter().map(|&(t, _)| t).collect());
+        }
+        let mut skipped = Vec::new();
+        for &(token, colour) in overrides {
+            if Tier::needed_for(colour) > self.tier {
+                skipped.push(token);
+            } else {
+                token.set(&mut self, colour);
+            }
+        }
+        (self, skipped)
     }
 }

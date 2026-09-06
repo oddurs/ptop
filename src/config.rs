@@ -14,17 +14,33 @@
 
 use crate::glyphs::GlyphSet;
 use crate::sample::{ProcSample, Sample};
-use crate::theme::{Palette, Theme, Tier};
+use crate::theme::{Palette, Theme, Tier, Token};
+use ratatui::style::Color;
 use std::ffi::OsString;
 use std::path::PathBuf;
 use std::time::Duration;
 
 /// Everything settable, resolved.
-#[derive(Clone, Copy, PartialEq, Debug)]
+#[derive(Clone, PartialEq, Debug)]
 pub struct Settings {
     pub glyphs: GlyphSet,
     pub tier: Tier,
+    /// The theme asked for: a built-in, or a file in `~/.config/ptop/themes`.
+    /// Whether it resolves is settled in [`resolve`], which is where the
+    /// loader is — the key table cannot read files.
+    pub theme: String,
+    /// Where `theme` was last set, as `file:line`, when that was a file.
+    ///
+    /// Every other setting is judged where it is read, so the line number is
+    /// still in hand. A theme name can only be judged once something can look
+    /// for the file, which is after the whole config has been parsed — so this
+    /// is the one key that has to carry its origin forward. Without it a bad
+    /// theme is the only config error that cannot point at a line.
+    pub theme_origin: Option<String>,
+    /// Filled in by [`resolve`]: the built-in to start from, and the user's
+    /// colours to write over it.
     pub palette: Palette,
+    pub overrides: Vec<(Token, Color)>,
     /// Where "getting busy" and "in trouble" begin, as percentages.
     pub warn: f32,
     pub critical: f32,
@@ -42,7 +58,10 @@ impl Settings {
         Self {
             glyphs: default_glyphs(),
             tier: Tier::detect(),
+            theme: Palette::default().name().to_string(),
+            theme_origin: None,
             palette: Palette::default(),
+            overrides: Vec::new(),
             warn: Theme::DEFAULT_WARN_PCT,
             critical: Theme::DEFAULT_CRITICAL_PCT,
             interval: crate::app::DEFAULT_INTERVAL,
@@ -65,6 +84,12 @@ impl Settings {
     }
 }
 
+/// Themes for tests: only the built-ins exist unless a test says otherwise.
+#[cfg(test)]
+fn no_themes(name: &str) -> Result<(String, String), String> {
+    Err(format!("no theme `{name}`"))
+}
+
 #[cfg(test)]
 impl Settings {
     /// Settings that do not depend on the environment, for tests.
@@ -77,7 +102,10 @@ impl Settings {
         Self {
             glyphs: GlyphSet::Braille,
             tier: Tier::TrueColor,
+            theme: Palette::Safe.name().to_string(),
+            theme_origin: None,
             palette: Palette::Safe,
+            overrides: Vec::new(),
             warn: Theme::DEFAULT_WARN_PCT,
             critical: Theme::DEFAULT_CRITICAL_PCT,
             interval: crate::app::DEFAULT_INTERVAL,
@@ -163,9 +191,12 @@ pub const KEYS: &[(&str, Apply)] = &[
         Ok(())
     }),
     ("theme", |s, v| {
-        s.palette = match v {
-            "auto" | "default" => Palette::default(),
-            _ => Palette::parse(v).ok_or("safe, classic or auto")?,
+        // Any name parses. It may name a file this table cannot see, and
+        // rejecting unknown names here would make user themes impossible.
+        // `resolve` settles whether it exists.
+        s.theme = match v {
+            "auto" | "default" => Palette::default().name().to_string(),
+            _ => v.to_string(),
         };
         Ok(())
     }),
@@ -287,6 +318,7 @@ pub fn apply(settings: &mut Settings, key: &str, value: &str) -> Result<(), Bad>
 }
 
 /// Something ptop could not use, and where it came from.
+#[derive(Debug)]
 ///
 /// Carried rather than printed at the point of discovery: config is read before
 /// the alternate screen opens, and anything written to the terminal then is
@@ -341,10 +373,14 @@ pub fn path_from(xdg: Option<OsString>, home: Option<OsString>) -> Option<PathBu
 /// ignoring it would do something other than what was asked.
 pub fn resolve(
     mut settings: Settings,
-    file: Option<(&str, &str)>,
-    no_color: bool,
+    sources: Sources<'_>,
     args: &[String],
 ) -> Result<(Settings, Vec<String>, Vec<Warning>), Bad> {
+    let Sources {
+        file,
+        no_color,
+        themes,
+    } = sources;
     let mut warnings = Vec::new();
     if let Some((origin, text)) = file {
         apply_file(&mut settings, text, origin, &mut warnings);
@@ -392,13 +428,142 @@ pub fn resolve(
         match a.strip_prefix("--").and_then(|f| f.split_once('=')) {
             Some((key, value)) if KEYS.iter().any(|(k, _)| *k == key) => {
                 apply(&mut settings, key, value)?;
+                if key == "theme" {
+                    settings.theme_origin = None;
+                }
             }
             _ => positional.push(a.clone()),
         }
     }
     check_settings(&settings).map_err(Bad::Pair)?;
 
+    // Themes resolve last, because the name is a setting like any other and
+    // the last source to set it wins.
+    //
+    // Which source that was decides what a failure costs, the same asymmetry
+    // as everywhere else: a name typed for this run is fatal, a name sitting
+    // in a file falls back to the default with a warning. Checked by looking
+    // for the flag rather than by threading an origin through the table,
+    // because the flag is the thing that makes it fatal.
+    let from_flag = args.iter().any(|a| a.starts_with("--theme="));
+    match resolve_theme(&settings.theme, themes, &mut warnings) {
+        Ok((palette, overrides)) => {
+            settings.palette = palette;
+            settings.overrides = overrides;
+        }
+        Err(why) if from_flag => return Err(Bad::Pair(why)),
+        Err(why) => {
+            // Anchored to the line that named it, like every other config
+            // warning. A theme is resolved after the file is fully parsed, so
+            // without the remembered origin this is the one error that could
+            // not point at anything.
+            let at = settings
+                .theme_origin
+                .as_ref()
+                .map_or(String::new(), |o| format!("{o}: "));
+            warnings.push(Warning(format!(
+                "{at}{why} — using `{}`",
+                Palette::default().name()
+            )));
+            settings.theme = Palette::default().name().to_string();
+            settings.palette = Palette::default();
+        }
+    }
+
     Ok((settings, positional, warnings))
+}
+
+/// What to say about a theme this terminal could not fully use, if anything.
+///
+/// Here rather than in `main` so the wording is testable. It is the only part
+/// of theme handling a user sees when it goes right-ish, and there are two
+/// quite different things to say.
+pub fn theme_note(
+    tier: Tier,
+    name: &str,
+    theme: &Theme,
+    overrides: &[(Token, Color)],
+    skipped: &[Token],
+) -> Option<String> {
+    if overrides.is_empty() {
+        return None;
+    }
+    // Monochrome does not *fail* to show a theme, it declines to — a different
+    // thing to be told. Listing ten tokens it "cannot show" and ten
+    // replacements all reading `default` names no line the user could rewrite,
+    // and it would fire on every run under NO_COLOR, TERM=dumb, or no TERM at
+    // all, which is most of CI.
+    if tier == Tier::Mono {
+        return Some(format!(
+            "theme `{name}` is not used: this terminal is monochrome, where meaning \
+             never rests on colour anyway"
+        ));
+    }
+    if skipped.is_empty() {
+        return None;
+    }
+    // Named, not counted. "3 colours were dropped" tells a user they have a
+    // problem; naming them and what was kept instead tells them which lines to
+    // rewrite, which is the only thing they can act on.
+    Some(format!(
+        "theme `{name}`: this terminal is {tier:?} and cannot show {}; keeping {}",
+        skipped
+            .iter()
+            .map(|t| t.name())
+            .collect::<Vec<_>>()
+            .join(", "),
+        skipped
+            .iter()
+            .map(|&tok| format!(
+                "{} = {}",
+                tok.name(),
+                crate::theme::write_color(tok.get(theme))
+            ))
+            .collect::<Vec<_>>()
+            .join(", "),
+    ))
+}
+
+/// Reads a named theme, returning its origin and contents or why not.
+///
+/// Injected rather than called directly so the theme rules can be tested
+/// without a filesystem, the same way `Sources::file` is.
+pub type ThemeReader<'a> = &'a dyn Fn(&str) -> Result<(String, String), String>;
+
+/// Where settings come from, other than the command line.
+///
+/// Taken rather than read, so precedence and the theme rules can be tested
+/// without a filesystem or a process-global environment.
+pub struct Sources<'a> {
+    pub file: Option<(&'a str, &'a str)>,
+    pub no_color: bool,
+    /// A named theme's origin and contents, or why it could not be read.
+    pub themes: ThemeReader<'a>,
+}
+
+/// A theme name to a base palette and the colours written over it.
+///
+/// Built-ins win. A user file called `safe.theme` would otherwise shadow the
+/// palette that everything else in this project is measured against, and
+/// silently — the shadowing would be invisible in every message ptop prints.
+fn resolve_theme(
+    name: &str,
+    themes: ThemeReader<'_>,
+    warnings: &mut Vec<Warning>,
+) -> Result<(Palette, Vec<(Token, Color)>), String> {
+    if let Some(builtin) = Palette::parse(name) {
+        return Ok((builtin, Vec::new()));
+    }
+    let (origin, text) = themes(name).map_err(|why| {
+        match closest_in(name, &[Palette::Safe.name(), Palette::Classic.name()]) {
+            Some(k) => format!("{why} (did you mean `{k}`?)"),
+            None => why,
+        }
+    })?;
+    // Inheriting from `safe` rather than from nothing, so a theme that sets
+    // two colours is two lines. Requiring all ten is why people do not write
+    // themes.
+    Ok((Palette::Safe, parse_theme(&text, &origin, warnings)))
 }
 
 /// The thresholds have to be usable as a pair, which neither key can tell
@@ -494,6 +659,36 @@ fn origin_of(file: &Option<(&str, &str)>) -> String {
 /// A missing file is not an error — the overwhelmingly common case is not
 /// having one — and neither is an unreadable one, which is worth a word rather
 /// than a refusal to start.
+/// Read a named theme from `~/.config/ptop/themes/NAME.theme`.
+///
+/// Beside the config file rather than inside it: a theme is a document people
+/// swap, paste and publish, and a format you can send someone as one file is
+/// the whole reason btop has 41 themes and htop has eight.
+pub fn read_theme(name: &str) -> Result<(String, String), String> {
+    // A theme name becomes a path, so it must not be able to leave the themes
+    // directory. `--theme=../../../etc/passwd` is a mistake worth refusing
+    // rather than a traversal worth worrying about — nothing here runs with
+    // privilege — but reading an arbitrary file and reporting its contents as
+    // bad colour values is a poor way to answer it either way.
+    if name.is_empty() || name.contains(['/', '\\']) || name.contains("..") {
+        return Err(format!("`{name}` is not a theme name"));
+    }
+    let Some(dir) = path().and_then(|p| p.parent().map(|d| d.join("themes"))) else {
+        return Err(format!(
+            "no theme `{name}`, and no home directory to look in"
+        ));
+    };
+    let path = dir.join(format!("{name}.theme"));
+    match std::fs::read_to_string(&path) {
+        Ok(text) => Ok((path.display().to_string(), text)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Err(format!(
+            "no theme `{name}`: not a built-in, and {} does not exist",
+            path.display()
+        )),
+        Err(e) => Err(format!("theme `{name}`: {}: {e}", path.display())),
+    }
+}
+
 pub fn read(warnings: &mut Vec<Warning>) -> Option<(String, String)> {
     let path = path()?;
     match std::fs::read_to_string(&path) {
@@ -512,6 +707,28 @@ pub fn read(warnings: &mut Vec<Warning>) -> Option<(String, String)> {
 /// lines: a config that refuses to load because of a single bad key is worse
 /// than one that ignores it and says so.
 pub fn apply_file(settings: &mut Settings, text: &str, origin: &str, warnings: &mut Vec<Warning>) {
+    for_each_setting(text, origin, warnings, |key, value, line| {
+        apply(settings, key, value).map_err(|bad| bad.to_string())?;
+        if key == "theme" {
+            settings.theme_origin = Some(format!("{origin}:{line}"));
+        }
+        Ok(())
+    });
+}
+
+/// Walk a `key = value` file, handing each usable line to `f` and reporting
+/// the rest.
+///
+/// Shared by the config file and by theme files. They hold different keys but
+/// the same grammar, and two copies of a grammar drift — the leading-`#`
+/// exemption exists *for* theme files, so a second parser would be the one
+/// that got it wrong.
+fn for_each_setting(
+    text: &str,
+    origin: &str,
+    warnings: &mut Vec<Warning>,
+    mut f: impl FnMut(&str, &str, usize) -> Result<(), String>,
+) {
     for (n, raw) in text.lines().enumerate() {
         let line = n + 1;
         let mut warn = |msg: String| warnings.push(Warning(format!("{origin}:{line}: {msg}")));
@@ -534,10 +751,36 @@ pub fn apply_file(settings: &mut Settings, text: &str, origin: &str, warnings: &
             warn(format!("`{key}` has no value"));
             continue;
         }
-        if let Err(bad) = apply(settings, key, value) {
-            warn(bad.to_string());
+        if let Err(why) = f(key, value, line) {
+            warn(why);
         }
     }
+}
+
+/// Read a theme file into token overrides.
+///
+/// Every token is optional. Requiring all ten is the reason people do not
+/// write themes — btop ships 41 because a theme is one file and one line per
+/// colour, htop has eight hardcoded in C and nobody has ever added a ninth.
+/// Overriding two colours should be two lines.
+///
+/// A malformed value warns and that token alone falls back, rather than
+/// failing the file: the same rule as the config file, for the same reason.
+pub fn parse_theme(text: &str, origin: &str, warnings: &mut Vec<Warning>) -> Vec<(Token, Color)> {
+    let mut out = Vec::new();
+    for_each_setting(text, origin, warnings, |key, value, _| {
+        let token = Token::parse(key).ok_or_else(|| {
+            let hint = closest_in(key, &Token::ALL.map(Token::name))
+                .map_or(String::new(), |k| format!(" (did you mean `{k}`?)"));
+            format!("unknown colour `{key}`{hint}")
+        })?;
+        let colour = crate::theme::parse_color(value).ok_or_else(|| {
+            format!("`{key}`: expected a colour like `#5ccfe6`, `80` or `cyan`, found `{value}`")
+        })?;
+        out.push((token, colour));
+        Ok(())
+    });
+    out
 }
 
 /// Drop a trailing `# comment` from a value.
@@ -564,9 +807,21 @@ fn strip_comment(value: &str) -> &str {
 /// Bounded by half the key's length so a genuinely unrelated word gets no
 /// suggestion — a confidently wrong hint is worse than none.
 fn closest(key: &str) -> Option<&'static str> {
-    KEYS.iter()
-        .map(|&(k, _)| (distance(key, k), k))
-        .filter(|&(d, k)| d <= k.len() / 2 + 1)
+    closest_in(key, &KEYS.iter().map(|&(k, _)| k).collect::<Vec<_>>())
+}
+
+/// The nearest name in a set, or none if nothing is near enough.
+///
+/// Two edits, the conventional threshold, rather than a bound that scales with
+/// the candidate's length. Scaling looked reasonable and was far too loose on
+/// short names: `nope` is three edits from `safe` on a four-letter word, and
+/// ptop offered it. A confidently wrong hint is worse than none, and it is
+/// worst when the tool sounds sure.
+fn closest_in(key: &str, names: &[&'static str]) -> Option<&'static str> {
+    names
+        .iter()
+        .map(|&k| (distance(key, k), k))
+        .filter(|&(d, _)| d <= 2)
         .min()
         .map(|(_, k)| k)
 }
@@ -611,7 +866,13 @@ mod tests {
             Settings {
                 glyphs: GlyphSet::Block,
                 tier: Tier::Mono,
-                palette: Palette::Classic,
+                // `theme`, not `palette`: the name is the setting, and the
+                // palette is what `resolve` turns it into once it can see
+                // whether a file of that name exists.
+                theme: "classic".to_string(),
+                // …and the line it came from, kept because a theme is the one
+                // setting judged somewhere other than where it is read.
+                theme_origin: Some("conf:3".to_string()),
                 ..Settings::fixed()
             }
         );
@@ -646,7 +907,7 @@ mod tests {
             "glyphs = block\n\
              nonsense\n\
              colour = mono\n\
-             theme = nosuchtheme\n\
+             color = ultraviolet\n\
              color =\n\
              theme = classic\n",
         );
@@ -655,7 +916,7 @@ mod tests {
             GlyphSet::Block,
             "a line before the bad ones was lost"
         );
-        assert_eq!(s.palette, Palette::Classic, "a line after them was lost");
+        assert_eq!(s.theme, "classic", "a line after them was lost");
         assert_eq!(w.len(), 4, "{w:?}");
         for (i, line) in (2..=5).enumerate() {
             assert!(w[i].starts_with(&format!("conf:{line}:")), "{}", w[i]);
@@ -685,6 +946,10 @@ mod tests {
 
     #[test]
     fn a_wild_guess_gets_no_suggestion() {
+        // Three edits on a four-letter word is not a near miss. ptop used to
+        // answer `theme = nope` with "did you mean `safe`?" — the name it was
+        // about to fall back to anyway.
+        assert_eq!(closest_in("nope", &["safe", "classic"]), None);
         // A confidently wrong hint is worse than none.
         assert_eq!(closest("supercalifragilistic"), None);
         assert_eq!(closest("colour"), Some("color"));
@@ -764,8 +1029,16 @@ mod precedence {
 
     fn run(file: Option<&str>, no_color: bool, args: &[&str]) -> (Settings, Vec<String>) {
         let args: Vec<String> = args.iter().map(|s| s.to_string()).collect();
-        let (s, positional, _) =
-            resolve(base(), file.map(|t| ("conf", t)), no_color, &args).expect("flags are valid");
+        let (s, positional, _) = resolve(
+            base(),
+            Sources {
+                file: file.map(|t| ("conf", t)),
+                no_color,
+                themes: &no_themes,
+            },
+            &args,
+        )
+        .expect("flags are valid");
         (s, positional)
     }
 
@@ -808,7 +1081,18 @@ mod precedence {
         assert_eq!(s.glyphs, GlyphSet::Braille, "a rejected value was applied");
 
         let args = vec!["--glyphs=crayon".to_string()];
-        assert!(resolve(base(), None, false, &args).is_err());
+        assert!(
+            resolve(
+                base(),
+                Sources {
+                    file: None,
+                    no_color: false,
+                    themes: &no_themes
+                },
+                &args
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -830,7 +1114,16 @@ mod thresholds {
 
     fn run(file: Option<&str>, args: &[&str]) -> Result<(Settings, Vec<Warning>), Bad> {
         let args: Vec<String> = args.iter().map(|s| s.to_string()).collect();
-        resolve(base(), file.map(|t| ("conf", t)), false, &args).map(|(s, _, w)| (s, w))
+        resolve(
+            base(),
+            Sources {
+                file: file.map(|t| ("conf", t)),
+                no_color: false,
+                themes: &no_themes,
+            },
+            &args,
+        )
+        .map(|(s, _, w)| (s, w))
     }
 
     #[test]
@@ -929,7 +1222,16 @@ mod rate {
 
     fn run(file: &str, args: &[&str]) -> Result<(Settings, Vec<Warning>), Bad> {
         let args: Vec<String> = args.iter().map(|s| s.to_string()).collect();
-        resolve(Settings::fixed(), Some(("conf", file)), false, &args).map(|(s, _, w)| (s, w))
+        resolve(
+            Settings::fixed(),
+            Sources {
+                file: Some(("conf", file)),
+                no_color: false,
+                themes: &no_themes,
+            },
+            &args,
+        )
+        .map(|(s, _, w)| (s, w))
     }
 
     #[test]
@@ -1044,5 +1346,238 @@ mod rate {
             1,
             "a buffer that cannot hold a sample was accepted"
         );
+    }
+}
+
+#[cfg(test)]
+mod themes {
+    use super::*;
+
+    /// A theme reader over a fixed set, so the rules are testable without a
+    /// filesystem.
+    fn from(
+        pairs: &'static [(&'static str, &'static str)],
+    ) -> impl Fn(&str) -> Result<(String, String), String> {
+        move |name| {
+            pairs
+                .iter()
+                .find(|(n, _)| *n == name)
+                .map(|(n, text)| (format!("{n}.theme"), text.to_string()))
+                .ok_or_else(|| format!("no theme `{name}`"))
+        }
+    }
+
+    fn run(
+        args: &[&str],
+        file: Option<&str>,
+        themes: ThemeReader<'_>,
+    ) -> Result<(Settings, Vec<Warning>), Bad> {
+        let args: Vec<String> = args.iter().map(|s| s.to_string()).collect();
+        resolve(
+            Settings::fixed(),
+            Sources {
+                file: file.map(|t| ("conf", t)),
+                no_color: false,
+                themes,
+            },
+            &args,
+        )
+        .map(|(s, _, w)| (s, w))
+    }
+
+    const NORD: &str = "ok = #8fbcbb\nseries_cpu = 67\n";
+
+    #[test]
+    fn a_theme_may_set_any_subset_and_inherit_the_rest() {
+        // Requiring all ten is the reason people do not write themes.
+        let (s, w) = run(&["--theme=nord"], None, &from(&[("nord", NORD)])).unwrap();
+        assert!(
+            w.is_empty(),
+            "{:?}",
+            w.iter().map(|x| &x.0).collect::<Vec<_>>()
+        );
+        assert_eq!(s.palette, Palette::Safe, "a partial theme lost its base");
+        assert_eq!(
+            s.overrides,
+            vec![
+                (Token::Ok, Color::Rgb(0x8f, 0xbc, 0xbb)),
+                (Token::SeriesCpu, Color::Indexed(67)),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_builtin_cannot_be_shadowed_by_a_file() {
+        // A user file called `safe.theme` would otherwise silently replace the
+        // palette everything in this project is measured against.
+        let shadow = from(&[("safe", "ok = #ff0000\n")]);
+        let (s, _) = run(&["--theme=safe"], None, &shadow).unwrap();
+        assert_eq!(s.palette, Palette::Safe);
+        assert!(s.overrides.is_empty(), "a file shadowed the built-in");
+    }
+
+    #[test]
+    fn one_bad_colour_falls_back_alone() {
+        // Good lines on *both* sides of the bad ones. With the good line last,
+        // a theme that threw away everything it had on each new colour would
+        // still pass — it kept the final one either way.
+        let (s, w) = run(
+            &["--theme=t"],
+            None,
+            &from(&[(
+                "t",
+                "ok = #8fbcbb\nwarn = notacolour\ncritical\nnosuch = red\nlive = 80\n",
+            )]),
+        )
+        .unwrap();
+        assert_eq!(
+            s.overrides,
+            vec![
+                (Token::Ok, Color::Rgb(0x8f, 0xbc, 0xbb)),
+                (Token::Live, Color::Indexed(80)),
+            ],
+            "a good colour was lost to a bad one on another line"
+        );
+        assert_eq!(
+            w.len(),
+            3,
+            "{:?}",
+            w.iter().map(|x| &x.0).collect::<Vec<_>>()
+        );
+        assert!(
+            w[0].0.contains("t.theme:2") && w[0].0.contains("notacolour"),
+            "{}",
+            w[0].0
+        );
+        assert!(w[1].0.contains("t.theme:3"), "{}", w[1].0);
+        // No suggestion for `nosuch`: it is six edits from every token, and a
+        // confidently wrong hint is worse than none.
+        assert!(w[2].0.contains("nosuch"), "{}", w[2].0);
+        assert!(!w[2].0.contains("did you mean"), "{}", w[2].0);
+    }
+
+    #[test]
+    fn a_missing_theme_is_fatal_from_a_flag_and_a_warning_from_the_file() {
+        // The same asymmetry as every other setting: a name typed for this run
+        // is fatal; a name sitting in a file falls back and says so.
+        assert!(run(&["--theme=nope"], None, &from(&[])).is_err());
+
+        let (s, w) = run(&[], Some("theme = nope\n"), &from(&[])).unwrap();
+        assert_eq!(
+            s.palette,
+            Palette::Safe,
+            "a missing theme was not fallen back from"
+        );
+        assert_eq!(w.len(), 1);
+        assert!(
+            w[0].0.contains("nope") && w[0].0.contains("safe"),
+            "{}",
+            w[0].0
+        );
+    }
+
+    #[test]
+    fn a_bad_theme_in_the_file_points_at_its_line() {
+        // Every other config warning reads `conf:4: ...`. A theme is resolved
+        // after the whole file is parsed, so without carrying the origin
+        // forward this would be the one error that cannot point at anything.
+        let (_, w) = run(
+            &[],
+            Some("glyphs = block\ncolor = 256\ntheme = nope\n"),
+            &from(&[]),
+        )
+        .unwrap();
+        assert_eq!(w.len(), 1);
+        assert!(w[0].0.starts_with("conf:3: "), "{}", w[0].0);
+    }
+
+    #[test]
+    fn a_flag_theme_reports_no_file_line() {
+        // The flag is where it came from, so a stale line from the file would
+        // point at something that is not the problem.
+        let (s, _) = run(&["--theme=safe"], Some("theme = classic\n"), &from(&[])).unwrap();
+        assert_eq!(s.theme_origin, None);
+    }
+
+    #[test]
+    fn a_misspelt_builtin_is_guessed() {
+        // The commonest `--theme` typo. It used to be caught by the key table
+        // and lost its suggestion when theme names stopped validating there.
+        let err = run(&["--theme=clasic"], None, &from(&[])).unwrap_err();
+        assert!(err.to_string().contains("did you mean `classic`?"), "{err}");
+    }
+
+    #[test]
+    fn monochrome_says_one_thing_rather_than_ten() {
+        use crate::theme::Tier;
+        let overrides = Token::ALL.map(|t| (t, Color::Red)).to_vec();
+        let (theme, skipped) = Theme::new(Palette::Safe, Tier::Mono).with_overrides(&overrides);
+
+        let note = theme_note(Tier::Mono, "nord", &theme, &overrides, &skipped)
+            .expect("a mono user with a theme should hear something");
+        assert!(note.contains("monochrome"), "{note}");
+        assert!(
+            !note.contains("series_cpu"),
+            "mono listed every token it 'cannot show': {note}"
+        );
+
+        // No theme, nothing to say — this fires on every run under NO_COLOR.
+        assert_eq!(theme_note(Tier::Mono, "safe", &theme, &[], &[]), None);
+    }
+
+    #[test]
+    fn an_ansi_index_works_on_an_ansi_terminal() {
+        use crate::theme::Tier;
+        // 0-15 *are* the ANSI slots: `ok = 6` and `ok = cyan` name the same
+        // thing, and a 16-colour terminal renders both.
+        let overrides = vec![
+            (Token::Ok, Color::Indexed(6)),
+            (Token::Warn, Color::Indexed(222)),
+        ];
+        let (theme, skipped) = Theme::new(Palette::Safe, Tier::Ansi16).with_overrides(&overrides);
+        assert_eq!(skipped, vec![Token::Warn], "an ANSI slot was refused");
+        assert_eq!(Token::get(Token::Ok, &theme), Color::Indexed(6));
+    }
+
+    #[test]
+    fn a_theme_name_cannot_walk_out_of_the_themes_directory() {
+        for name in ["../../../etc/passwd", "a/b", "..", ""] {
+            assert!(read_theme(name).is_err(), "`{name}` was accepted as a name");
+        }
+    }
+
+    #[test]
+    fn the_shipped_themes_match_the_compiled_ones() {
+        // A theme file is how people learn the format, so the two shipped ones
+        // have to actually be the palettes they claim. Regenerate with the
+        // `write_builtin_theme_files` test after changing a palette.
+        for (palette, text) in [
+            (Palette::Safe, include_str!("../themes/safe.theme")),
+            (Palette::Classic, include_str!("../themes/classic.theme")),
+        ] {
+            let built_in = Theme::new(palette, Tier::TrueColor);
+            let mut w = Vec::new();
+            let overrides = parse_theme(text, "shipped", &mut w);
+            assert!(
+                w.is_empty(),
+                "{:?}",
+                w.iter().map(|x| &x.0).collect::<Vec<_>>()
+            );
+            assert_eq!(
+                overrides.len(),
+                Token::ALL.len(),
+                "{}.theme does not name every colour",
+                palette.name()
+            );
+            for (token, colour) in overrides {
+                assert_eq!(
+                    colour,
+                    token.get(&built_in),
+                    "{}.theme has the wrong `{}` — regenerate it",
+                    palette.name(),
+                    token.name()
+                );
+            }
+        }
     }
 }

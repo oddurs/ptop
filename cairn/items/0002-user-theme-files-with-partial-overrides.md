@@ -2,10 +2,10 @@
 id: 2
 title: User theme files with partial overrides
 type: feature
-status: backlog
+status: done
 milestone: v1.0
 created: 2026-09-05
-updated: 2026-09-05
+updated: 2026-09-06
 priority: p2
 effort: m
 area: theme
