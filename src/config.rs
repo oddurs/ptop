@@ -446,7 +446,7 @@ pub fn resolve(
     // for the flag rather than by threading an origin through the table,
     // because the flag is the thing that makes it fatal.
     let from_flag = args.iter().any(|a| a.starts_with("--theme="));
-    match resolve_theme(&settings.theme, themes, &mut warnings) {
+    match resolve_named_theme(&settings.theme, themes, &mut warnings) {
         Ok((palette, overrides)) => {
             settings.palette = palette;
             settings.overrides = overrides;
@@ -546,7 +546,7 @@ pub struct Sources<'a> {
 /// Built-ins win. A user file called `safe.theme` would otherwise shadow the
 /// palette that everything else in this project is measured against, and
 /// silently — the shadowing would be invisible in every message ptop prints.
-fn resolve_theme(
+pub fn resolve_named_theme(
     name: &str,
     themes: ThemeReader<'_>,
     warnings: &mut Vec<Warning>,

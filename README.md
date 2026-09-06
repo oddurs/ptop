@@ -298,6 +298,50 @@ Squeezing 24-bit hex into sixteen slots would destroy exactly the separation
 the palettes were measured for — and those sixteen slots belong to your
 terminal theme, not to ptop.
 
+### Measuring a theme
+
+ptop is the only monitor that measures its own palette, and the moment you can
+supply your own that guarantee evaporates — unless the validator is turned
+outward. So it is:
+
+```
+$ ptop --check-theme muddy
+muddy: FAIL
+  ok          ↔ warn        ΔE   0.1  tritan    below the target of 8
+  ok          ↔ critical    ΔE  54.2  deutan
+  ...
+  critical    on surface         1.09:1          below 3:1
+  critical    on selected row    1.40:1          below 3:1
+  worst pair: ΔE 0.1   worst contrast: 1.09:1
+```
+
+Every pair, not only the failures: a theme passing at ΔE 8.1 is a different
+thing from one passing at 30, and the number is the point. It exits non-zero on
+failure, so it works in a script — **a contributed theme can arrive with a
+measurement rather than a screenshot.**
+
+**This is the same instrument CI uses.** The palette tests assert through
+`check::Report` rather than a second copy of the arithmetic, so ptop's own
+check and yours cannot come to disagree about the same colours.
+
+**A failing theme still loads**, with one line saying why:
+
+```
+ptop: theme `muddy`: ok and warn are only ΔE 0.1 apart (tritan), critical is
+      1.09:1 on the surface — run `ptop --check-theme muddy` for the rest
+```
+
+It is your terminal and your choice; ptop's job is to have the number and say
+it, not to refuse — the same principle as rendering `—` rather than a
+fabricated zero.
+
+`--check-theme classic` reports FAIL, and says why that is a decision rather
+than a bug: classic exists to restore the green/yellow convention, and
+green/yellow is the pair that convention gets wrong under red-green deficiency.
+That is the whole argument for `safe` being the default, and it is pinned by a
+test so that quietly "improving" classic would break the build rather than
+remove the argument.
+
 ### Sample rate and window
 
 `interval` is the time between samples; `window` is how much history to keep,

@@ -2,10 +2,10 @@
 id: 3
 title: Validate user themes and say why one fails
 type: feature
-status: backlog
+status: done
 milestone: v1.0
 created: 2026-09-05
-updated: 2026-09-05
+updated: 2026-09-06
 priority: p1
 effort: s
 area: theme
